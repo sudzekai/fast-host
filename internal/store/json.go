@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
 )
 
 const maxMetricsPerProject = 500
@@ -26,16 +25,22 @@ type jsonUserRecord struct {
 	CreatedAt    string `json:"created_at"`
 }
 
+// Disabled вместо Enabled: у записей, сохранённых до появления поля,
+// значение по умолчанию (false) означает «проект включён».
 type jsonProjectRecord struct {
-	ID         int64  `json:"id"`
-	UserID     int64  `json:"user_id"`
-	Name       string `json:"name"`
-	Domain     string `json:"domain"`
-	Status     string `json:"status"`
-	SSLEnabled bool   `json:"ssl_enabled"`
-	Path       string `json:"path"`
-	DiskBytes  int64  `json:"disk_bytes"`
-	CreatedAt  string `json:"created_at"`
+	ID           int64  `json:"id"`
+	UserID       int64  `json:"user_id"`
+	Name         string `json:"name"`
+	Domain       string `json:"domain"`
+	Status       string `json:"status"`
+	Disabled     bool   `json:"disabled,omitempty"`
+	SSLEnabled   bool   `json:"ssl_enabled"`
+	SSLIssuedAt  string `json:"ssl_issued_at,omitempty"`
+	SSLExpiresAt string `json:"ssl_expires_at,omitempty"`
+	Path         string `json:"path"`
+	DiskBytes    int64  `json:"disk_bytes"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
 }
 
 type jsonMetricRecord struct {
@@ -47,17 +52,19 @@ type jsonMetricRecord struct {
 	BandwidthCum int64  `json:"bandwidth_cum"`
 }
 
+// Записи хранятся по указателям: индексы-мапы ссылаются на те же объекты,
+// поэтому append (перевыделение массива) и удаление их не инвалидируют.
 type jsonStore struct {
 	mu sync.Mutex
 
 	dir string
 
-	users    []jsonUserRecord
+	users    []*jsonUserRecord
 	nextUID  int64
 	userByID map[int64]*jsonUserRecord
 	userName map[string]*jsonUserRecord
 
-	projects    []jsonProjectRecord
+	projects    []*jsonProjectRecord
 	nextPID     int64
 	projectByID map[int64]*jsonProjectRecord
 	projectDom  map[string]*jsonProjectRecord
@@ -102,26 +109,30 @@ func (s *jsonStore) load() error {
 	if err := os.MkdirAll(filepath.Join(s.dir, "metrics"), 0o755); err != nil {
 		return err
 	}
-	var users jsonList[jsonUserRecord]
+	var users jsonList[*jsonUserRecord]
 	if err := readJSONFile(s.dataPath("users.json"), &users); err != nil {
 		return err
 	}
 	s.users, s.nextUID = users.Items, users.NextID
-	for i := range s.users {
-		rec := &s.users[i]
+	for _, rec := range s.users {
 		s.userByID[rec.ID] = rec
 		s.userName[rec.Username] = rec
+		if rec.ID >= s.nextUID {
+			s.nextUID = rec.ID + 1
+		}
 	}
 
-	var projects jsonList[jsonProjectRecord]
+	var projects jsonList[*jsonProjectRecord]
 	if err := readJSONFile(s.dataPath("projects.json"), &projects); err != nil {
 		return err
 	}
 	s.projects, s.nextPID = projects.Items, projects.NextID
-	for i := range s.projects {
-		rec := &s.projects[i]
+	for _, rec := range s.projects {
 		s.projectByID[rec.ID] = rec
 		s.projectDom[rec.Domain] = rec
+		if rec.ID >= s.nextPID {
+			s.nextPID = rec.ID + 1
+		}
 	}
 
 	var settings struct {
@@ -167,11 +178,11 @@ func (s *jsonStore) writeFile(path string, v any) error {
 }
 
 func (s *jsonStore) saveUsers() error {
-	return s.writeFile(s.dataPath("users.json"), jsonList[jsonUserRecord]{NextID: s.nextUID, Items: s.users})
+	return s.writeFile(s.dataPath("users.json"), jsonList[*jsonUserRecord]{NextID: s.nextUID, Items: s.users})
 }
 
 func (s *jsonStore) saveProjects() error {
-	return s.writeFile(s.dataPath("projects.json"), jsonList[jsonProjectRecord]{NextID: s.nextPID, Items: s.projects})
+	return s.writeFile(s.dataPath("projects.json"), jsonList[*jsonProjectRecord]{NextID: s.nextPID, Items: s.projects})
 }
 
 func (s *jsonStore) saveSettings() error {
@@ -197,8 +208,9 @@ func toUser(rec *jsonUserRecord) *User {
 func toProject(rec *jsonProjectRecord) *Project {
 	return &Project{
 		ID: rec.ID, UserID: rec.UserID, Name: rec.Name, Domain: rec.Domain,
-		Status: rec.Status, SSLEnabled: rec.SSLEnabled, Path: rec.Path,
-		DiskBytes: rec.DiskBytes, CreatedAt: rec.CreatedAt,
+		Status: rec.Status, Enabled: !rec.Disabled,
+		SSLEnabled: rec.SSLEnabled, SSLIssuedAt: rec.SSLIssuedAt, SSLExpiresAt: rec.SSLExpiresAt,
+		Path: rec.Path, DiskBytes: rec.DiskBytes, CreatedAt: rec.CreatedAt, UpdatedAt: rec.UpdatedAt,
 	}
 }
 
@@ -218,15 +230,15 @@ func (s *jsonStore) CreateUser(u *User) error {
 	id := s.nextUID
 	s.nextUID++
 	if u.CreatedAt == "" {
-		u.CreatedAt = time.Now().Format("2006-01-02 15:04:05")
+		u.CreatedAt = Now()
 	}
-	rec := jsonUserRecord{
+	rec := &jsonUserRecord{
 		ID: id, Username: u.Username, PasswordHash: u.PasswordHash,
 		Role: u.Role, QuotaBytes: u.QuotaBytes, CreatedAt: u.CreatedAt,
 	}
 	s.users = append(s.users, rec)
-	s.userByID[id] = &s.users[len(s.users)-1]
-	s.userName[u.Username] = &s.users[len(s.users)-1]
+	s.userByID[id] = rec
+	s.userName[u.Username] = rec
 	u.ID = id
 	return s.saveUsers()
 }
@@ -251,21 +263,23 @@ func (s *jsonStore) GetUserByUsername(name string) (*User, error) {
 	return toUser(rec), nil
 }
 
+func (s *jsonStore) usageLocked(userID int64) (used int64, count int) {
+	for _, p := range s.projects {
+		if p.UserID == userID {
+			used += p.DiskBytes
+			count++
+		}
+	}
+	return used, count
+}
+
 func (s *jsonStore) ListUsersDetailed() ([]UserDetailed, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]UserDetailed, 0, len(s.users))
-	for i := range s.users {
-		u := toUser(&s.users[i])
-		var used int64
-		count := 0
-		for j := range s.projects {
-			if s.projects[j].UserID == u.ID {
-				used += s.projects[j].DiskBytes
-				count++
-			}
-		}
-		out = append(out, UserDetailed{User: *u, UsedBytes: used, ProjectCount: count})
+	for _, rec := range s.users {
+		used, count := s.usageLocked(rec.ID)
+		out = append(out, UserDetailed{User: *toUser(rec), UsedBytes: used, ProjectCount: count})
 	}
 	return out, nil
 }
@@ -277,16 +291,8 @@ func (s *jsonStore) GetUserDetailed(id int64) (*UserDetailed, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	var used int64
-	count := 0
-	for j := range s.projects {
-		if s.projects[j].UserID == id {
-			used += s.projects[j].DiskBytes
-			count++
-		}
-	}
-	u := toUser(rec)
-	return &UserDetailed{User: *u, UsedBytes: used, ProjectCount: count}, nil
+	used, count := s.usageLocked(id)
+	return &UserDetailed{User: *toUser(rec), UsedBytes: used, ProjectCount: count}, nil
 }
 
 func (s *jsonStore) UpdateUserPassword(id int64, hash string) error {
@@ -326,18 +332,22 @@ func (s *jsonStore) CreateProject(p *Project) error {
 	id := s.nextPID
 	s.nextPID++
 	if p.CreatedAt == "" {
-		p.CreatedAt = time.Now().Format("2006-01-02 15:04:05")
+		p.CreatedAt = Now()
 	}
-	rec := jsonProjectRecord{
-		ID: id, UserID: p.UserID, Name: p.Name, Domain: p.Domain,
-		Status: p.Status, SSLEnabled: p.SSLEnabled, Path: p.Path,
-		DiskBytes: p.DiskBytes, CreatedAt: p.CreatedAt,
-	}
+	rec := &jsonProjectRecord{ID: id, UserID: p.UserID, CreatedAt: p.CreatedAt}
+	fillProjectRecord(rec, p)
 	s.projects = append(s.projects, rec)
-	s.projectByID[id] = &s.projects[len(s.projects)-1]
-	s.projectDom[p.Domain] = &s.projects[len(s.projects)-1]
+	s.projectByID[id] = rec
+	s.projectDom[p.Domain] = rec
 	p.ID = id
 	return s.saveProjects()
+}
+
+func fillProjectRecord(rec *jsonProjectRecord, p *Project) {
+	rec.Name, rec.Domain, rec.Status = p.Name, p.Domain, p.Status
+	rec.Disabled = !p.Enabled
+	rec.SSLEnabled, rec.SSLIssuedAt, rec.SSLExpiresAt = p.SSLEnabled, p.SSLIssuedAt, p.SSLExpiresAt
+	rec.Path, rec.DiskBytes, rec.UpdatedAt = p.Path, p.DiskBytes, p.UpdatedAt
 }
 
 func (s *jsonStore) GetProjectByID(id int64) (*Project, error) {
@@ -364,9 +374,9 @@ func (s *jsonStore) ListProjectsByUser(userID int64) ([]Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []Project
-	for i := range s.projects {
-		if s.projects[i].UserID == userID {
-			out = append(out, *toProject(&s.projects[i]))
+	for _, rec := range s.projects {
+		if rec.UserID == userID {
+			out = append(out, *toProject(rec))
 		}
 	}
 	return out, nil
@@ -376,8 +386,8 @@ func (s *jsonStore) ListAllProjects() ([]Project, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Project, 0, len(s.projects))
-	for i := range s.projects {
-		p := toProject(&s.projects[i])
+	for _, rec := range s.projects {
+		p := toProject(rec)
 		if owner, ok := s.userByID[p.UserID]; ok {
 			p.Username = owner.Username
 		}
@@ -394,11 +404,13 @@ func (s *jsonStore) UpdateProject(p *Project) error {
 		return ErrNotFound
 	}
 	if rec.Domain != p.Domain {
+		if other, taken := s.projectDom[p.Domain]; taken && other != rec {
+			return ErrDuplicate
+		}
 		delete(s.projectDom, rec.Domain)
 		s.projectDom[p.Domain] = rec
 	}
-	rec.Name, rec.Domain, rec.Status = p.Name, p.Domain, p.Status
-	rec.SSLEnabled, rec.Path, rec.DiskBytes = p.SSLEnabled, p.Path, p.DiskBytes
+	fillProjectRecord(rec, p)
 	return s.saveProjects()
 }
 
@@ -425,7 +437,7 @@ func (s *jsonStore) DeleteProject(id int64) error {
 	delete(s.metricsID, id)
 	delete(s.projectDom, rec.Domain)
 	delete(s.projectByID, id)
-	keep := s.projects[:0]
+	keep := make([]*jsonProjectRecord, 0, len(s.projects))
 	for _, p := range s.projects {
 		if p.ID != id {
 			keep = append(keep, p)
@@ -452,6 +464,10 @@ func (s *jsonStore) loadMetricsLocked(pid int64) {
 func (s *jsonStore) AddMetric(m *Metric) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.projectByID[m.ProjectID]; !ok {
+		// проект удалён, пока сборщик метрик его обрабатывал
+		return ErrNotFound
+	}
 	s.loadMetricsLocked(m.ProjectID)
 	id := s.metricsID[m.ProjectID]
 	s.metricsID[m.ProjectID] = id + 1
@@ -513,6 +529,16 @@ func (s *jsonStore) SetSetting(key, value string) error {
 	return s.saveSettings()
 }
 
-func (s *jsonStore) UsersFile() string   { return s.dataPath("users.json") }
+func (s *jsonStore) DeleteSetting(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.settings[key]; !ok {
+		return nil
+	}
+	delete(s.settings, key)
+	return s.saveSettings()
+}
+
+func (s *jsonStore) UsersFile() string    { return s.dataPath("users.json") }
 func (s *jsonStore) ProjectsFile() string { return s.dataPath("projects.json") }
 func (s *jsonStore) Dir() string          { return s.dir }

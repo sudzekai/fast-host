@@ -11,6 +11,7 @@ import (
 	"hosting/internal/config"
 	"hosting/internal/httpx"
 	"hosting/internal/metrics"
+	"hosting/internal/nginx"
 	"hosting/internal/store"
 )
 
@@ -18,16 +19,17 @@ type Handlers struct {
 	cfg     *config.Config
 	store   store.Storage
 	sampler *metrics.Sampler
+	nginx   *nginx.Manager
 	web     fs.FS
 }
 
-func New(cfg *config.Config, st store.Storage, sampler *metrics.Sampler, webFS fs.FS) *Handlers {
-	return &Handlers{cfg: cfg, store: st, sampler: sampler, web: webFS}
+func New(cfg *config.Config, st store.Storage, sampler *metrics.Sampler, ngx *nginx.Manager, webFS fs.FS) *Handlers {
+	return &Handlers{cfg: cfg, store: st, sampler: sampler, nginx: ngx, web: webFS}
 }
 
 var (
-	nameRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
-	userRe   = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
+	userRe = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
 )
 
 func validProjectName(n string) bool { return nameRe.MatchString(n) }
@@ -38,10 +40,47 @@ func projectDir(dataDir, username, projectName string) string {
 	return filepath.Join(dataDir, "users", username, "projects", projectName)
 }
 
-func cleanProjectPath(p *store.Project, path string) bool {
-	root := filepath.Clean(p.Path)
-	full := filepath.Clean(filepath.Join(p.Path, path))
-	return strings.HasPrefix(full, root+string(os.PathSeparator)) || full == root
+// insideUsersDir защищает os.RemoveAll от пути вне {dataDir}/users (битая запись в БД и т.п.).
+func (h *Handlers) insideUsersDir(path string) bool {
+	root := filepath.Join(h.cfg.DataDir, "users") + string(os.PathSeparator)
+	return path != "" && strings.HasPrefix(filepath.Clean(path)+string(os.PathSeparator), root) &&
+		filepath.Clean(path)+string(os.PathSeparator) != root
+}
+
+func isAdmin(r *http.Request) bool {
+	u := httpx.UserFrom(r)
+	return u != nil && u.Role == store.RoleAdmin
+}
+
+// publicProject — то, что уходит в API: путь на диске виден только администратору.
+func (h *Handlers) publicProject(r *http.Request, p *store.Project) map[string]any {
+	out := map[string]any{
+		"id": p.ID, "user_id": p.UserID, "username": p.Username, "name": p.Name, "domain": p.Domain,
+		"status": p.Status, "enabled": p.Enabled, "ssl_enabled": p.SSLEnabled,
+		"ssl_issued_at": p.SSLIssuedAt, "ssl_expires_at": p.SSLExpiresAt,
+		"disk_bytes": p.DiskBytes, "created_at": p.CreatedAt, "updated_at": p.UpdatedAt,
+		"site_url": h.siteURL(p),
+	}
+	if isAdmin(r) {
+		out["path"] = p.Path
+	}
+	return out
+}
+
+func (h *Handlers) publicProjects(r *http.Request, list []store.Project) []map[string]any {
+	out := make([]map[string]any, 0, len(list))
+	for i := range list {
+		out = append(out, h.publicProject(r, &list[i]))
+	}
+	return out
+}
+
+// hidePaths убирает из текста ошибки абсолютные пути сервера для клиентов.
+func (h *Handlers) hidePaths(r *http.Request, msg string) string {
+	if isAdmin(r) {
+		return msg
+	}
+	return strings.ReplaceAll(msg, h.cfg.DataDir+string(os.PathSeparator), "")
 }
 
 func (h *Handlers) canAccess(r *http.Request, p *store.Project) bool {
@@ -59,6 +98,9 @@ func (h *Handlers) loadProject(w http.ResponseWriter, r *http.Request) *store.Pr
 	if !h.canAccess(r, p) {
 		httpx.Error(w, http.StatusForbidden, "нет доступа к проекту")
 		return nil
+	}
+	if owner, err := h.store.GetUserByID(p.UserID); err == nil {
+		p.Username = owner.Username
 	}
 	return p
 }

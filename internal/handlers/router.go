@@ -39,8 +39,9 @@ func NewRouter(h *Handlers, secret string) http.Handler {
 	mux.Handle("GET /api/projects/{id}/download", authMW(http.HandlerFunc(h.downloadProjectZip)))
 	mux.Handle("GET /api/projects/{id}/files", authMW(http.HandlerFunc(h.listFiles)))
 	mux.Handle("GET /api/projects/{id}/metrics", authMW(http.HandlerFunc(h.projectMetrics)))
-	mux.Handle("GET /api/projects/{id}/nginx-config", authMW(http.HandlerFunc(h.getNginxConfig)))
+	mux.Handle("GET /api/projects/{id}/nginx-config", adminMW(http.HandlerFunc(h.getNginxConfig)))
 	mux.Handle("POST /api/projects/{id}/apply-ssl", authMW(http.HandlerFunc(h.applySSL)))
+	mux.Handle("PUT /api/projects/{id}/enabled", authMW(http.HandlerFunc(h.setProjectEnabled)))
 
 	mux.Handle("GET /api/admin/users", adminMW(http.HandlerFunc(h.adminListUsers)))
 	mux.Handle("GET /api/admin/users/{id}", adminMW(http.HandlerFunc(h.adminGetUser)))

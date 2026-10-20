@@ -151,7 +151,6 @@ button { font-family: var(--font); }
 .content {
   flex: 1;
   padding: 24px 32px 48px;
-  max-width: 1200px;
   min-width: 0;
 }
 
@@ -220,6 +219,11 @@ button { font-family: var(--font); }
 .btn-block { width: 100%; justify-content: center; }
 
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Иконки — inline SVG без размеров: без явных width/height растягиваются на весь контейнер. */
+.btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.btn-sm svg { width: 14px; height: 14px; }
+.btn-icon { padding: 6px; }
 
 /* ===== Карточки ===== */
 .card {
@@ -612,7 +616,8 @@ textarea.code {
 .file-list li:hover { background: var(--bg); }
 .file-list .f-path { font-family: var(--mono); font-size: 12.5px; flex: 1; word-break: break-all; }
 .file-list .f-size { color: var(--muted); font-variant-numeric: tabular-nums; }
-.file-icon { color: var(--faint); flex-shrink: 0; }
+.file-icon { width: 16px; height: 16px; color: var(--faint); flex-shrink: 0; }
+.file-list li > span:first-child { display: inline-flex; }
 
 /* ===== Инфо-лист ===== */
 .info-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; }

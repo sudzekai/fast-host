@@ -50,9 +50,44 @@ func (s *Sampler) SampleAll() {
 	}
 	for i := range projects {
 		p := projects[i]
-		if err := s.SampleProject(&p); err != nil {
+		if err := s.SampleProject(&p); err != nil && !errors.Is(err, store.ErrNotFound) {
 			log.Printf("metrics: project %s: %v", p.Name, err)
 		}
+	}
+}
+
+// Forget сбрасывает состояние удалённого проекта.
+func (s *Sampler) Forget(projectID int64) {
+	s.mu.Lock()
+	delete(s.offsets, projectID)
+	s.mu.Unlock()
+	_ = s.store.DeleteSetting(offsetKey(projectID))
+}
+
+func offsetKey(projectID int64) string { return "log_offset:" + strconv.FormatInt(projectID, 10) }
+
+// offset хранится в БД, иначе после перезапуска access.log читался бы с начала
+// и запросы прибавлялись к накопленным счётчикам повторно.
+func (s *Sampler) offset(projectID int64) int64 {
+	s.mu.Lock()
+	off, ok := s.offsets[projectID]
+	s.mu.Unlock()
+	if ok {
+		return off
+	}
+	if v, err := s.store.GetSetting(offsetKey(projectID)); err == nil {
+		off, _ = strconv.ParseInt(v, 10, 64)
+	}
+	return off
+}
+
+func (s *Sampler) setOffset(projectID, off int64) {
+	s.mu.Lock()
+	prev, ok := s.offsets[projectID]
+	s.offsets[projectID] = off
+	s.mu.Unlock()
+	if !ok || prev != off {
+		_ = s.store.SetSetting(offsetKey(projectID), strconv.FormatInt(off, 10))
 	}
 }
 
@@ -72,7 +107,7 @@ func (s *Sampler) SampleProject(p *store.Project) error {
 	}
 	m := &store.Metric{
 		ProjectID:    p.ID,
-		TS:           time.Now().Format("2006-01-02 15:04:05"),
+		TS:           store.Now(),
 		DiskBytes:    disk,
 		RequestsCum:  creq + dreq,
 		BandwidthCum: cbw + dbw,
@@ -95,23 +130,27 @@ func (s *Sampler) accessLogDelta(projectID int64, path string) (requests, bytes 
 	if err != nil {
 		return 0, 0, err
 	}
-	s.mu.Lock()
-	off := s.offsets[projectID]
+	off := s.offset(projectID)
 	if off > stat.Size() {
-		off = 0
+		off = 0 // лог ротирован или усечён
 	}
-	s.mu.Unlock()
 	if off >= stat.Size() {
+		s.setOffset(projectID, off)
 		return 0, 0, nil
 	}
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		return 0, 0, err
 	}
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
+	// Читаем только целые строки: последняя может быть ещё недописана nginx.
+	r := bufio.NewReaderSize(f, 64*1024)
+	read := off
+	for {
+		line, err := r.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		read += int64(len(line))
+		if len(line) <= 1 {
 			continue
 		}
 		requests++
@@ -121,12 +160,7 @@ func (s *Sampler) accessLogDelta(projectID int64, path string) (requests, bytes 
 			}
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return 0, 0, err
-	}
-	s.mu.Lock()
-	s.offsets[projectID] = stat.Size()
-	s.mu.Unlock()
+	s.setOffset(projectID, read)
 	return requests, bytes, nil
 }
 

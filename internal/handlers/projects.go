@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ func (h *Handlers) listProjects(w http.ResponseWriter, r *http.Request) {
 		used += projects[i].DiskBytes
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"projects":   projects,
+		"projects":   h.publicProjects(r, projects),
 		"used_bytes": used,
 		"quota":      u.QuotaBytes,
 	})
@@ -57,28 +58,39 @@ func (h *Handlers) createProject(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := h.store.GetProjectByDomain(req.Domain); err == nil {
-		httpx.Error(w, http.StatusConflict, "домен уже используется другим проектом")
-		return
+	// www.example.com и example.com обслуживаются одним server-блоком — это один сайт.
+	for _, d := range nginx.Aliases(req.Domain) {
+		if _, err := h.store.GetProjectByDomain(d); err == nil {
+			httpx.Error(w, http.StatusConflict, "домен уже используется другим проектом")
+			return
+		}
 	}
 	dir := projectDir(h.cfg.DataDir, u.Username, req.Name)
 	if _, err := os.Stat(dir); err == nil {
 		httpx.Error(w, http.StatusConflict, "проект с таким именем уже существует")
 		return
 	}
-	if err := nginx.WriteFiles(dir, req.Domain, h.cfg.CertbotEmail, u.Username+"/"+req.Name); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "ошибка создания конфигурации: "+err.Error())
+	if err := os.MkdirAll(filepath.Join(dir, ".conf"), 0o755); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "не удалось создать каталог проекта")
 		return
 	}
 	p := &store.Project{
-		UserID: u.ID, Name: req.Name, Domain: req.Domain,
-		Status: store.StatusActive, Path: dir,
+		UserID: u.ID, Username: u.Username, Name: req.Name, Domain: req.Domain,
+		Status: store.StatusActive, Enabled: true, Path: dir,
+	}
+	if err := h.nginx.Apply(h.site(p), true); err != nil {
+		os.RemoveAll(dir)
+		log.Printf("nginx: %s: %v", p.Domain, err)
+		httpx.Error(w, http.StatusBadGateway, "nginx не применил конфигурацию: "+h.hidePaths(r, err.Error()))
+		return
 	}
 	if err := h.store.CreateProject(p); err != nil {
+		_ = h.nginx.Apply(h.site(p), false)
+		os.RemoveAll(dir)
 		httpx.Error(w, httpx.ErrStatus(err), "не удалось создать проект")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"project": p})
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"project": h.publicProject(r, p)})
 }
 
 func (h *Handlers) getProject(w http.ResponseWriter, r *http.Request) {
@@ -86,12 +98,7 @@ func (h *Handlers) getProject(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	if p.Username == "" {
-		if owner, err := h.store.GetUserByID(p.UserID); err == nil {
-			p.Username = owner.Username
-		}
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": p})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"project": h.publicProject(r, p)})
 }
 
 func (h *Handlers) deleteProject(w http.ResponseWriter, r *http.Request) {
@@ -99,13 +106,26 @@ func (h *Handlers) deleteProject(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
+	if !h.insideUsersDir(p.Path) {
+		log.Printf("delete: путь проекта %d вне каталога users: %q", p.ID, p.Path)
+		httpx.Error(w, http.StatusInternalServerError, "некорректный путь проекта, обратитесь к администратору")
+		return
+	}
+	// Сначала убираем сайт из nginx: он не должен указывать на удаляемый каталог.
+	if err := h.nginx.Remove(p.Domain); err != nil {
+		log.Printf("nginx: удаление %s: %v", p.Domain, err)
+	}
 	if err := os.RemoveAll(p.Path); err != nil {
+		log.Printf("delete: %s: %v", p.Path, err)
 		httpx.Error(w, http.StatusInternalServerError, "ошибка удаления файлов")
 		return
 	}
 	if err := h.store.DeleteProject(p.ID); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка базы данных")
 		return
+	}
+	if h.sampler != nil {
+		h.sampler.Forget(p.ID)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -115,7 +135,12 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	u := httpx.UserFrom(r)
+	// Квота — владельца проекта, даже если загружает администратор.
+	owner, err := h.store.GetUserByID(p.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "владелец проекта не найден")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<30)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "ошибка чтения формы: "+err.Error())
@@ -128,7 +153,7 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	projects, err := h.store.ListProjectsByUser(u.ID)
+	projects, err := h.store.ListProjectsByUser(owner.ID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка базы данных")
 		return
@@ -137,7 +162,7 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	for _, pr := range projects {
 		used += pr.DiskBytes
 	}
-	quotaLeft := u.QuotaBytes - used
+	quotaLeft := owner.QuotaBytes - used
 	if quotaLeft <= 0 {
 		httpx.Error(w, http.StatusRequestEntityTooLarge, "квота хранения исчерпана")
 		return
@@ -148,7 +173,7 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка временного файла")
 		return
 	}
-	defer os.Remove(tmp.Name())
+	defer os.Remove(tmp.Name()) // на случай раннего выхода; ниже удаляется явно до подсчёта размера
 	if _, err := io.Copy(tmp, file); err != nil {
 		tmp.Close()
 		httpx.Error(w, http.StatusBadRequest, "ошибка чтения архива")
@@ -194,13 +219,15 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	os.RemoveAll(staging)
+	os.Remove(tmp.Name())
 	p.DiskBytes = dirSize(p.Path)
-	if err := h.store.UpdateProjectDisk(p.ID, p.DiskBytes); err != nil {
+	p.UpdatedAt = store.Now()
+	if err := h.store.UpdateProject(p); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка базы данных")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"project":    p,
+		"project":    h.publicProject(r, p),
 		"written":    written,
 		"disk_bytes": p.DiskBytes,
 	})
@@ -279,45 +306,6 @@ func (h *Handlers) listFiles(w http.ResponseWriter, r *http.Request) {
 		return out[i].Path < out[j].Path
 	})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"files": out})
-}
-
-func (h *Handlers) getNginxConfig(w http.ResponseWriter, r *http.Request) {
-	p := h.loadProject(w, r)
-	if p == nil {
-		return
-	}
-	cfg, err := nginx.ReadConfig(p.Path)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "конфиг не найден")
-		return
-	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"config": cfg})
-}
-
-type sslResp struct {
-	Message    string `json:"message"`
-	SSLEnabled bool   `json:"ssl_enabled"`
-	Live       bool   `json:"live"`
-}
-
-func (h *Handlers) applySSL(w http.ResponseWriter, r *http.Request) {
-	p := h.loadProject(w, r)
-	if p == nil {
-		return
-	}
-	out, err := nginx.ApplyCertbot(p.Path, p.Domain, h.cfg.CertbotEmail, h.cfg.EnableLiveSSL)
-	if err != nil {
-		p.Status = store.StatusError
-		_ = h.store.UpdateProject(p)
-		httpx.Error(w, http.StatusInternalServerError, out)
-		return
-	}
-	p.Status = store.StatusActive
-	if h.cfg.EnableLiveSSL {
-		p.SSLEnabled = true
-	}
-	_ = h.store.UpdateProject(p)
-	httpx.WriteJSON(w, http.StatusOK, sslResp{Message: out, SSLEnabled: p.SSLEnabled, Live: h.cfg.EnableLiveSSL})
 }
 
 func lowerASCII(s string) string {

@@ -11,10 +11,16 @@ function route() {
 }
 
 async function boot() {
-  render();
   window.addEventListener('hashchange', () => render());
-  const ok = await refreshMe();
-  if (ok) render();
+  // Квоту/роль мог поменять администратор, пока вкладка была открыта.
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible' || !state.me) return;
+    const before = JSON.stringify(state.me);
+    await refreshMe();
+    if (JSON.stringify(state.me) !== before) render({ skipRefresh: true });
+  });
+  await refreshMe();
+  render({ skipRefresh: true });
 }
 
 async function refreshMe() {
@@ -30,7 +36,16 @@ async function refreshMe() {
   }
 }
 
-function render() {
+let renderSeq = 0;
+
+// Перед каждой отрисовкой панели перечитываем /api/me: квота, роль и занятое место
+// всегда актуальны, а истёкшая сессия сразу ведёт на страницу входа.
+async function render(opts = {}) {
+  const seq = ++renderSeq;
+  if (state.me && !opts.skipRefresh) {
+    await refreshMe();
+    if (seq !== renderSeq) return;
+  }
   const app = document.getElementById('app');
   app.innerHTML = '';
   const parts = route();
@@ -71,7 +86,7 @@ function renderLogin(app) {
       });
       await refreshMe();
       location.hash = '#/';
-      render();
+      render({ skipRefresh: true });
     } catch (e) {
       toast(e.message, 'err');
       btn.disabled = false;
@@ -110,7 +125,7 @@ function renderRegister(app) {
       });
       await refreshMe();
       location.hash = '#/';
-      render();
+      render({ skipRefresh: true });
     } catch (e) {
       toast(e.message, 'err');
       btn.disabled = false;
@@ -136,7 +151,7 @@ function renderShell(app, parts) {
   const nav = h('nav', { class: 'sidebar' }, [
     h('div', { class: 'nav-section-label', html: 'Управление' }),
     ...menu.map((m) =>
-      h('a', { class: 'nav-item' + (activeKey === m.key ? ' active' : ''), href: m.href, html: m.icon + ' ' + m.label })
+      h('a', { class: 'nav-item' + (activeKey === m.key ? ' active' : ''), href: m.href }, [m.icon, m.label])
     ),
   ]);
 
@@ -146,7 +161,7 @@ function renderShell(app, parts) {
       await api.post('/api/auth/logout');
       state.me = null;
       location.hash = '#/';
-      render();
+      render({ skipRefresh: true });
     },
   }, ICONS.logout + ' Выйти');
 
@@ -201,14 +216,14 @@ async function renderDashboard(page) {
 
   try {
     const data = await api.get('/api/projects');
-    const quota = state.me.quota_bytes || 0;
+    const quota = data.quota || 0;
     const pct = quota > 0 ? Math.min(100, Math.round((data.used_bytes / quota) * 100)) : 0;
 
     page.append(h('div', { class: 'grid grid-3 mb-24' }, [
       h('div', { class: 'card stat-card' }, [
         h('div', { class: 'stat-label', html: 'Проекты' }),
         h('div', { class: 'stat-value', html: String(data.projects.length) }),
-        h('div', { class: 'stat-hint', html: 'активных доменов' }),
+        h('div', { class: 'stat-hint', html: 'включено: ' + data.projects.filter((p) => p.enabled).length }),
       ]),
       h('div', { class: 'card stat-card' }, [
         h('div', { class: 'stat-label', html: 'Занято на диске' }),
@@ -235,7 +250,7 @@ async function renderDashboard(page) {
       h('tr', {}, [
         h('td', {}, [h('span', { class: 'row-link', onclick: () => { location.hash = '#/projects/' + p.id; } }, escapeHtml(p.name))]),
         h('td', { class: 'mono word-break', html: escapeHtml(p.domain) }),
-        h('td', {}, [badge(p.status)]),
+        h('td', {}, [statusBadge(p)]),
         h('td', {}, [p.ssl_enabled ? badge('on') : badge('off')]),
         h('td', { class: 'num', html: formatBytes(p.disk_bytes) }),
       ])
@@ -255,7 +270,7 @@ async function renderDashboard(page) {
       ]),
     ]));
   } catch (e) {
-    page.append(h('div', { class: 'card empty-state', html: e.message }));
+    page.append(h('div', { class: 'card empty-state' }, e.message));
   }
 }
 
@@ -318,18 +333,19 @@ async function renderProjectsList(page) {
       wrap.append(h('table', { class: 'table' }, [
         h('thead', {}, [h('tr', {}, [
           th('Название', 'name'), th('Домен', 'domain'), th('Статус', 'status'), th('SSL', 'ssl_enabled'),
-          th('Размер', 'disk_bytes', 'num'), th('Создан', 'created_at'), th('', ''),
+          th('Размер', 'disk_bytes', 'num'), th('Изменён', 'updated_at'), th('Создан', 'created_at'), th('', ''),
         ])]),
         h('tbody', {}, rows.map((p) =>
           h('tr', {}, [
             h('td', {}, [h('span', { class: 'row-link', onclick: () => { location.hash = '#/projects/' + p.id; } }, escapeHtml(p.name))]),
             h('td', { class: 'mono word-break', html: escapeHtml(p.domain) }),
-            h('td', {}, [badge(p.status)]),
+            h('td', {}, [statusBadge(p)]),
             h('td', {}, [p.ssl_enabled ? badge('on') : badge('off')]),
             h('td', { class: 'num', html: formatBytes(p.disk_bytes) }),
+            h('td', { class: 'muted', html: formatDate(p.updated_at) }),
             h('td', { class: 'muted', html: formatDate(p.created_at) }),
             h('td', {}, [
-              h('button', { class: 'btn btn-sm btn-danger', title: 'Удалить', onclick: () => deleteProject(p) }, ICONS.trash),
+              h('button', { class: 'btn btn-sm btn-danger btn-icon', title: 'Удалить', onclick: () => deleteProject(p) }, ICONS.trash),
             ]),
           ])
         )),
@@ -337,7 +353,7 @@ async function renderProjectsList(page) {
     };
     renderProjectsTable();
   } catch (e) {
-    page.append(h('div', { class: 'card empty-state', html: e.message }));
+    page.append(h('div', { class: 'card empty-state' }, e.message));
   }
 }
 
@@ -351,7 +367,7 @@ function createProjectModal() {
     h('div', { class: 'field' }, [
       h('label', { html: 'Домен' }),
       h('input', { class: 'input', id: 'np-domain', placeholder: 'example.com', autocapitalize: 'none' }),
-      h('div', { class: 'hint', html: 'Домен должен указывать на IP этого сервера. Сразу будет создан nginx-конфиг.' }),
+      h('div', { class: 'hint', html: 'Домен должен указывать на IP этого сервера. Сайт сразу подключается к nginx.' }),
     ]),
   ]);
   const foot = [
@@ -363,7 +379,7 @@ function createProjectModal() {
           domain: document.getElementById('np-domain').value.trim(),
         });
         closeModal();
-        toast('Проект создан, nginx-конфиг сгенерирован');
+        toast('Проект создан и подключён к nginx');
         render();
       } catch (e) {
         toast(e.message, 'err');
@@ -374,18 +390,24 @@ function createProjectModal() {
 }
 
 async function deleteProject(p) {
-  const ok = await confirmDialog('Удаление проекта', 'Удалить проект <b>' + escapeHtml(p.name) + '</b> (' + escapeHtml(p.domain) + ')?<br>Все файлы, конфиг и метрики будут удалены.', true);
+  const ok = await confirmDialog('Удаление проекта', 'Удалить проект <b>' + escapeHtml(p.name) + '</b> (' + escapeHtml(p.domain) + ')?<br>Файлы сайта, конфиг nginx, сертификаты и метрики будут удалены с диска безвозвратно.', true);
   if (!ok) return;
   try {
     await api.del('/api/projects/' + p.id);
     toast('Проект удалён');
-    render();
+    if (route()[0] === 'projects' && route()[1]) location.hash = '#/projects';
+    else render();
   } catch (e) {
     toast(e.message, 'err');
   }
 }
 
 /* ================= ДЕТАЛИ ПРОЕКТА ================= */
+
+function statusBadge(p) {
+  if (!p.enabled) return badge('disabled');
+  return badge(p.status);
+}
 
 async function renderProjectDetail(page, id) {
   page.innerHTML = '';
@@ -397,7 +419,7 @@ async function renderProjectDetail(page, id) {
     p = data.project;
   } catch (e) {
     page.innerHTML = '';
-    page.append(h('div', { class: 'card empty-state', html: e.message }));
+    page.append(h('div', { class: 'card empty-state' }, e.message));
     return;
   }
 
@@ -405,17 +427,17 @@ async function renderProjectDetail(page, id) {
   page.append(breadcrumbs([
     { href: '#/', label: 'Панель' },
     { href: '#/projects', label: 'Проекты' },
-    { label: 'Проект #' + id },
+    { label: p.name },
   ]));
 
   const refreshDetail = () => renderProjectDetail(page, id);
-  const siteUrl = (p.ssl_enabled ? 'https://' : 'http://') + p.domain;
 
   const actions = h('div', { class: 'page-actions' }, [
     h('button', { class: 'btn', onclick: refreshDetail }, ICONS.refresh + ' Обновить'),
-    h('button', { class: 'btn', onclick: () => window.open(siteUrl, '_blank') }, ICONS.external + ' Открыть сайт'),
-    h('button', { class: 'btn', onclick: () => window.location = '/api/projects/' + p.id + '/download' }, ICONS.download + ' Скачать'),
-    h('label', { class: 'btn btn-primary', html: ICONS.upload + ' Загрузить ZIP' }, [
+    h('button', { class: 'btn', disabled: !p.enabled, title: p.enabled ? '' : 'Проект выключен', onclick: () => window.open(p.site_url, '_blank') }, ICONS.external + ' Открыть сайт'),
+    h('button', { class: 'btn', onclick: () => { window.location = '/api/projects/' + p.id + '/download'; } }, ICONS.download + ' Скачать'),
+    h('label', { class: 'btn btn-primary' }, [
+      ICONS.upload, 'Загрузить ZIP',
       h('input', {
         type: 'file', accept: '.zip', style: 'display:none',
         onchange: (e) => uploadZip(p, e.target.files[0]),
@@ -425,45 +447,77 @@ async function renderProjectDetail(page, id) {
 
   page.append(h('div', { class: 'page-head' }, [
     h('div', {}, [
-      h('div', { class: 'page-title flex' }, [escapeHtml(p.name), badge(p.status), p.ssl_enabled ? badge('ssl') : null]),
-      h('div', { class: 'page-sub mono', html: escapeHtml(p.domain) }),
+      h('div', { class: 'page-title flex' }, [escapeHtml(p.name), statusBadge(p), p.ssl_enabled ? badge('ssl') : null]),
+      h('div', { class: 'page-sub mono' }, p.domain),
     ]),
     actions,
   ]));
 
-  page.append(h('div', { class: 'card card-pad mb-24' }, [
-    h('div', { class: 'info-list' }, [
-      infoItem('Домен', p.domain),
-      infoItem('Статус', p.status === 'active' ? 'Активен' : 'Ошибка'),
-      infoItem('SSL-сертификат', p.ssl_enabled ? 'Установлен' : 'Не установлен'),
-      infoItem('Размер на диске', formatBytes(p.disk_bytes)),
-      infoItem('Путь к папке', p.path),
-      infoItem('Создан', formatDate(p.created_at)),
+  const toggle = h('label', { class: 'switch', title: p.enabled ? 'Выключить сайт' : 'Включить сайт' }, [
+    h('input', {
+      type: 'checkbox',
+      checked: !!p.enabled,
+      onchange: async (e) => {
+        const enabled = e.target.checked;
+        e.target.disabled = true;
+        try {
+          await api.put('/api/projects/' + p.id + '/enabled', { enabled });
+          toast(enabled ? 'Сайт включён' : 'Сайт выключен: nginx больше не обслуживает ' + p.domain);
+          refreshDetail();
+        } catch (err) {
+          e.target.checked = !enabled;
+          e.target.disabled = false;
+          toast(err.message, 'err');
+        }
+      },
+    }),
+    h('span', { class: 'slider' }),
+  ]);
+
+  page.append(h('div', { class: 'card mb-24' }, [
+    h('div', { class: 'card-head' }, [
+      h('div', {}, [
+        h('div', { class: 'card-title', html: 'Сайт ' + (p.enabled ? 'включён' : 'выключен') }),
+        h('div', { class: 'card-sub', html: p.enabled
+          ? 'nginx обслуживает домен и его www-вариант'
+          : 'Запросы к домену не попадают на сайт. Файлы, настройки и сертификат сохранены.' }),
+      ]),
+      toggle,
+    ]),
+    h('div', { class: 'card-pad' }, [
+      h('div', { class: 'info-list' }, [
+        infoItem('Домен', p.domain),
+        infoItem('Адрес сайта', p.site_url),
+        infoItem('Статус', !p.enabled ? 'Выключен' : p.status === 'active' ? 'Активен' : 'Ошибка'),
+        infoItem('Размер на диске', formatBytes(p.disk_bytes)),
+        infoItem('Создан', formatDate(p.created_at)),
+        infoItem('Последнее изменение', p.updated_at ? formatDate(p.updated_at) : 'файлы ещё не загружались'),
+        infoItem('SSL-сертификат', p.ssl_enabled ? 'Установлен' : 'Не установлен'),
+        infoItem('SSL выдан', formatDate(p.ssl_issued_at)),
+        infoItem('SSL действует до', formatDate(p.ssl_expires_at)),
+        p.path ? infoItem('Путь к папке (видит только администратор)', p.path) : null,
+      ]),
     ]),
   ]));
+
+  const sslText = p.ssl_enabled
+    ? 'Сертификат действует до <b>' + escapeHtml(formatDate(p.ssl_expires_at)) + '</b> и продлевается автоматически. HTTP-запросы перенаправляются на HTTPS.'
+    : 'После выпуска сертификата сайт откроется по HTTPS, а запросы на порт 80 будут перенаправляться на 443.';
 
   page.append(h('div', { class: 'grid grid-2 mb-24' }, [
     h('div', { class: 'card', id: 'metrics-card' }, [h('div', { class: 'card-head' }, [h('div', { class: 'card-title', html: 'Метрики' })]), h('div', { id: 'metrics-body' }, [skeleton()])]),
     h('div', { class: 'card' }, [
       h('div', { class: 'card-head' }, [
-        h('div', {}, [h('div', { class: 'card-title', html: 'SSL / Let\u2019s Encrypt' })]),
-        h('button', { class: 'btn btn-sm btn-primary', onclick: () => applySSL(p) }, 'Применить SSL'),
+        h('div', {}, [h('div', { class: 'card-title', html: 'SSL-сертификат' })]),
+        h('button', { class: 'btn btn-sm btn-primary', disabled: !p.enabled, onclick: (e) => applySSL(p, e.currentTarget) },
+          ICONS.shield + (p.ssl_enabled ? ' Перевыпустить' : ' Выпустить SSL')),
       ]),
-      h('div', { class: 'card-pad', id: 'ssl-body', html: 'Сертификат получается через certbot. Нажмите «Применить SSL» — будут сгенерированы и выполнены команды из <span class="mono">.conf/certbot.sh</span>.' }),
+      h('div', { class: 'card-pad' }, [
+        h('div', { html: sslText }),
+        !p.enabled ? h('div', { class: 'hint mt-8', html: 'Проект выключен — включите его, чтобы выпустить сертификат.' }) : null,
+      ]),
     ]),
   ]));
-
-  const nginxSection = h('div', { class: 'card mb-24' }, [
-    h('div', { class: 'code-head' }, [
-      h('span', { html: '.conf/nginx.conf' }),
-      h('button', { class: 'btn btn-sm', onclick: async () => {
-        try { await navigator.clipboard.writeText(p._nginxConfig || ''); toast('Конфиг скопирован'); }
-        catch (e) { toast('Не удалось скопировать', 'err'); }
-      } }, ICONS.copy + ' Копировать'),
-    ]),
-    h('div', { class: 'code-block attached', id: 'nginx-body', html: 'Загрузка…' }),
-  ]);
-  page.append(nginxSection);
 
   page.append(h('div', { class: 'card mb-24' }, [
     h('div', { class: 'card-head' }, [h('div', { class: 'card-title', html: 'Файлы проекта' })]),
@@ -480,14 +534,13 @@ async function renderProjectDetail(page, id) {
   ]));
 
   loadMetrics(p);
-  loadNginxConfig(p);
   loadFiles(p);
 }
 
 function infoItem(label, value) {
   return h('div', { class: 'info-item' }, [
     h('div', { class: 'info-label', html: label }),
-    h('div', { class: 'info-value', html: escapeHtml(value) }),
+    h('div', { class: 'info-value' }, value == null || value === '' ? '—' : String(value)),
   ]);
 }
 
@@ -504,21 +557,26 @@ async function uploadZip(p, file) {
   }
 }
 
-async function applySSL(p) {
+async function applySSL(p, btn) {
+  if (btn) btn.disabled = true;
   try {
     const res = await api.post('/api/projects/' + p.id + '/apply-ssl');
-    const body = h('div', {}, [
-      h('div', { class: 'code-block', html: escapeHtml(res.message) }),
-      h('div', { class: 'hint mt-16', html: res.live
-        ? 'Сертификат установлен, сайт переведён на HTTPS.'
-        : 'Сервер запущен в тестовом режиме. Для реального получения сертификата запустите с флагом <span class="mono">-live-ssl</span> или <span class="mono">ENABLE_LIVE_SSL=1</span>, затем нажмите снова.' }),
-    ]);
-    const foot = [h('button', { class: 'btn btn-primary', onclick: closeModal }, 'Закрыть')];
-    openModal('Применение SSL', body, foot);
+    const np = res.project;
+    const lines = [
+      'Сертификат выпущен: действует с ' + escapeHtml(formatDate(np.ssl_issued_at)) + ' до <b>' + escapeHtml(formatDate(np.ssl_expires_at)) + '</b>.',
+      'Сайт доступен по <span class="mono">' + escapeHtml(np.site_url) + '</span>, HTTP перенаправляется на HTTPS.',
+    ];
+    if (res.provider === 'selfsigned') {
+      lines.push('Домен локальный, поэтому сертификат подписан локальным CA панели (Let’s Encrypt такие домены не проверяет). Браузер покажет предупреждение, пока CA не добавлен в доверенные'
+        + (res.ca_file ? ': <span class="mono">' + escapeHtml(res.ca_file) + '</span>.' : '.'));
+    }
+    openModal('SSL-сертификат', h('div', {}, lines.map((l) => h('p', { class: 'mb-16', html: l }))),
+      [h('button', { class: 'btn btn-primary', onclick: closeModal }, 'Закрыть')]);
     render();
   } catch (e) {
-    toast(e.message, 'err');
-    render();
+    openModal('Не удалось выпустить сертификат', h('div', { class: 'code-block' }, e.message),
+      [h('button', { class: 'btn btn-primary', onclick: closeModal }, 'Закрыть')]);
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -541,9 +599,9 @@ async function loadMetrics(p) {
     body.append(h('div', { class: 'card-pad' }, [
       h('div', { class: 'chart-legend' }, [h('span', {}, [h('span', { class: 'dot', style: 'background:#2F6FED' }), 'Диск, ГБ'])]),
       h('div', { class: 'chart-box' }, [c1]),
-      h('div', { class: 'chart-legend mt-16' }, [h('span', {}, [h('span', { class: 'dot', style: 'background:#12B76A' }), 'Запросы / мин'])]),
+      h('div', { class: 'chart-legend mt-16' }, [h('span', {}, [h('span', { class: 'dot', style: 'background:#12B76A' }), 'Запросы за интервал'])]),
       h('div', { class: 'chart-box' }, [c2]),
-      h('div', { class: 'mt-16 muted', html: 'Всего запросов: ' + formatBytes(data.requests_cum).replace(' Б', '').replace('КБ', ' тыс.').replace('МБ', ' млн.') + ' · Трафик: ' + formatBytes(data.bandwidth_cum) }),
+      h('div', { class: 'mt-16 muted', html: 'Всего запросов: ' + formatNumber(data.requests_cum) + ' · Трафик: ' + formatBytes(data.bandwidth_cum) }),
     ]));
     setTimeout(() => {
       chart(c1, labels, [diskGB], { format: (v) => v.toFixed(2), height: 140 });
@@ -551,19 +609,7 @@ async function loadMetrics(p) {
     }, 20);
   } catch (e) {
     body.innerHTML = '';
-    body.append(h('div', { class: 'card-pad muted', html: 'Метрики недоступны: ' + escapeHtml(e.message) }));
-  }
-}
-
-async function loadNginxConfig(p) {
-  const body = document.getElementById('nginx-body');
-  try {
-    const data = await api.get('/api/projects/' + p.id + '/nginx-config');
-    p._nginxConfig = data.config;
-    body.innerHTML = '';
-    body.append(h('div', { class: 'code-block', html: escapeHtml(data.config) }));
-  } catch (e) {
-    body.innerHTML = escapeHtml(e.message);
+    body.append(h('div', { class: 'card-pad muted' }, 'Метрики недоступны: ' + e.message));
   }
 }
 
@@ -587,7 +633,7 @@ async function loadFiles(p) {
     body.append(list);
   } catch (e) {
     body.innerHTML = '';
-    body.append(h('div', { class: 'empty-state', html: e.message }));
+    body.append(h('div', { class: 'empty-state' }, e.message));
   }
 }
 
@@ -736,7 +782,7 @@ async function renderAdminUsers(page) {
     };
     renderUsersTable();
   } catch (e) {
-    page.append(h('div', { class: 'card empty-state', html: e.message }));
+    page.append(h('div', { class: 'card empty-state' }, e.message));
   }
 }
 
@@ -806,7 +852,7 @@ async function renderAdminUserDetail(page, id) {
     data = await api.get('/api/admin/users/' + id);
   } catch (e) {
     page.innerHTML = '';
-    page.append(h('div', { class: 'card empty-state', html: e.message }));
+    page.append(h('div', { class: 'card empty-state' }, e.message));
     return;
   }
   page.innerHTML = '';
@@ -876,16 +922,17 @@ async function renderAdminUserDetail(page, id) {
       h('table', { class: 'table' }, [
         h('thead', {}, [h('tr', {}, [
           h('th', {}, 'Название'), h('th', {}, 'Домен'), h('th', {}, 'Статус'), h('th', {}, 'SSL'),
-          h('th', { class: 'num' }, 'Размер'), h('th', {}, 'Путь'),
+          h('th', { class: 'num' }, 'Размер'), h('th', {}, 'Изменён'), h('th', {}, 'Путь'),
         ])]),
         h('tbody', {}, (data.projects || []).map((p) =>
           h('tr', {}, [
             h('td', {}, [h('span', { class: 'row-link', onclick: () => { location.hash = '#/projects/' + p.id; } }, escapeHtml(p.name))]),
             h('td', { class: 'mono word-break', html: escapeHtml(p.domain) }),
-            h('td', {}, [badge(p.status)]),
+            h('td', {}, [statusBadge(p)]),
             h('td', {}, [p.ssl_enabled ? badge('on') : badge('off')]),
             h('td', { class: 'num', html: formatBytes(p.disk_bytes) }),
-            h('td', { class: 'mono muted', html: escapeHtml(p.path) }),
+            h('td', { class: 'muted', html: formatDate(p.updated_at) }),
+            h('td', { class: 'mono muted', html: escapeHtml(p.path || '') }),
           ])
         )),
       ]),
