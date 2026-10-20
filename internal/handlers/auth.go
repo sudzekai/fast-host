@@ -15,6 +15,7 @@ type loginReq struct {
 
 type registerReq struct {
 	Username string `json:"username"`
+	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
@@ -34,12 +35,12 @@ func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка авторизации")
 		return
 	}
-	auth.SetCookie(w, token)
+	auth.SetCookie(w, r, token)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
 func (h *Handlers) logout(w http.ResponseWriter, r *http.Request) {
-	auth.ClearCookie(w)
+	auth.ClearCookie(w, r)
 	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -68,6 +69,10 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "логин: 3-32 символа, буквы/цифры/подчёркивание")
 		return
 	}
+	if !validEmail(req.Email) {
+		httpx.Error(w, http.StatusBadRequest, "укажите корректный email")
+		return
+	}
 	if len(req.Password) < 6 {
 		httpx.Error(w, http.StatusBadRequest, "пароль не короче 6 символов")
 		return
@@ -83,7 +88,7 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 			defQuota = n
 		}
 	}
-	u := &store.User{Username: req.Username, PasswordHash: hash, Role: store.RoleUser, QuotaBytes: defQuota}
+	u := &store.User{Username: req.Username, Email: req.Email, PasswordHash: hash, Role: store.RoleUser, QuotaBytes: defQuota}
 	if err := h.store.CreateUser(u); err != nil {
 		httpx.Error(w, httpx.ErrStatus(err), "пользователь с таким логином уже существует")
 		return
@@ -93,7 +98,7 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка авторизации")
 		return
 	}
-	auth.SetCookie(w, token)
+	auth.SetCookie(w, r, token)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"user": u})
 }
 

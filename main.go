@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -22,9 +20,6 @@ import (
 	"hosting/internal/nginx"
 	"hosting/internal/store"
 )
-
-//go:embed all:web
-var webFS embed.FS
 
 func main() {
 	cfg, err := config.FromFlags()
@@ -80,11 +75,7 @@ func main() {
 		}()
 	}
 
-	sub, err := fs.Sub(webFS, "web")
-	if err != nil {
-		log.Fatal(err)
-	}
-	h := handlers.New(cfg, st, sampler, ngx, sub)
+	h := handlers.New(cfg, st, sampler, ngx)
 	h.SyncSites()
 	go h.RenewCertificates(ctx, 12*time.Hour)
 	router := handlers.NewRouter(h, cfg.JWTSecret)
@@ -121,6 +112,7 @@ func seedAdmin(st store.Storage, cfg *config.Config) {
 	}
 	u := &store.User{
 		Username:     cfg.AdminUsername,
+		Email:        cfg.CertbotEmail,
 		PasswordHash: hash,
 		Role:         store.RoleAdmin,
 		QuotaBytes:   store.DefaultQuotaBytes,

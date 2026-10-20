@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -18,6 +19,7 @@ type Config struct {
 	AllowRegistration  bool
 	MetricsIntervalSec int
 	EmbedMetrics       bool
+	CORSOrigins        []string
 
 	NginxBin       string
 	NginxConf      string // пусто — системный nginx; иначе панель сама ведёт главный конфиг и процесс
@@ -60,6 +62,7 @@ func FromFlags() (*Config, error) {
 	allowReg := flag.Bool("allow-registration", envOr("ALLOW_REGISTRATION", "1") == "1", "allow self-registration")
 	noMetrics := flag.Bool("no-metrics", false, "disable embedded metrics collector")
 	interval := flag.Int("metrics-interval", cfg.MetricsIntervalSec, "metrics sampling interval, seconds")
+	corsOrigins := flag.String("cors-origins", envOr("CORS_ORIGINS", ""), "comma-separated allowed browser origins (empty: same-origin only)")
 
 	nginxBin := flag.String("nginx-bin", envOr("NGINX_BIN", "nginx"), "nginx executable")
 	nginxConf := flag.String("nginx-conf", envOr("NGINX_CONF", ""), "own main nginx.conf managed by the panel (empty: system nginx)")
@@ -90,6 +93,11 @@ func FromFlags() (*Config, error) {
 	cfg.AllowRegistration = *allowReg
 	cfg.EmbedMetrics = !*noMetrics
 	cfg.MetricsIntervalSec = *interval
+	for _, o := range strings.Split(*corsOrigins, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			cfg.CORSOrigins = append(cfg.CORSOrigins, o)
+		}
+	}
 
 	cfg.NginxBin = *nginxBin
 	cfg.NginxConf = *nginxConf

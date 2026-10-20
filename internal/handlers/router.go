@@ -1,12 +1,8 @@
 package handlers
 
 import (
-	"bytes"
-	"io/fs"
 	"log"
-	"mime"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,8 +46,36 @@ func NewRouter(h *Handlers, secret string) http.Handler {
 	mux.Handle("PUT /api/admin/registration", adminMW(http.HandlerFunc(h.adminSetRegistration)))
 	mux.Handle("GET /api/admin/stats", adminMW(http.HandlerFunc(h.adminStats)))
 
-	mux.Handle("/", staticHandler(h.web))
-	return withLogging(mux)
+	return withLogging(cors(h.cfg.CORSOrigins, mux))
+}
+
+// cors разрешает запросы только с перечисленных origin (разделённых запятой).
+// Креденшелы (cookie) передаются только если origin совпал.
+func cors(origins []string, next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	for _, o := range origins {
+		if o = strings.TrimSpace(o); o != "" {
+			allowed[o] = true
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(allowed) > 0 {
+			origin := r.Header.Get("Origin")
+			if allowed[origin] {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Max-Age", "600")
+			}
+			w.Header().Add("Vary", "Origin")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func withLogging(next http.Handler) http.Handler {
@@ -61,28 +85,5 @@ func withLogging(next http.Handler) http.Handler {
 		if r.URL.Path != "/api/health" {
 			log.Printf("%s %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
 		}
-	})
-}
-
-func staticHandler(sub fs.FS) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" {
-			p = "index.html"
-		}
-		if _, err := fs.Stat(sub, p); err != nil {
-			p = "index.html"
-		}
-		b, err := fs.ReadFile(sub, p)
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		ct := mime.TypeByExtension(filepath.Ext(p))
-		if ct == "" {
-			ct = "application/octet-stream"
-		}
-		w.Header().Set("Content-Type", ct)
-		http.ServeContent(w, r, p, time.Time{}, bytes.NewReader(b))
 	})
 }

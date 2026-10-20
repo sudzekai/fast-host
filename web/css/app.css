@@ -662,3 +662,41 @@ textarea.code {
   .info-item:nth-last-child(-n+2) { border-bottom: 1px solid var(--border); }
   .info-item:last-child { border-bottom: none; }
 }
+
+/* ===== Тёмная тема ===== */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0F1420;
+  --surface: #1A2231;
+  --ink: #E6EAF2;
+  --ink-soft: #C3CBD8;
+  --muted: #8A94A6;
+  --faint: #5C6676;
+  --accent: #6B9BFF;
+  --accent-hover: #82AFFF;
+  --accent-soft: #233452;
+  --ok: #35D07F;
+  --ok-soft: #123324;
+  --warn: #F5A852;
+  --warn-soft: #36260F;
+  --err: #F26D63;
+  --err-soft: #3C1E1D;
+  --border: #293244;
+  --border-strong: #3A465C;
+  --sidebar-bg: #1A2231;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="dark"] .table th { background: #141B29; }
+[data-theme="dark"] .table tbody tr:hover { background: #141B29; }
+[data-theme="dark"] .progress { background: #293244; }
+[data-theme="dark"] .code-block { background: #10161F; }
+[data-theme="dark"] .code-head { background: #1B2434; }
+[data-theme="dark"] .badge-neutral { background: #293244; }
+[data-theme="dark"] .toast { background: #232E42; }
+[data-theme="dark"] .spinner { border-color: #3A465C; border-top-color: var(--accent); }
+[data-theme="dark"] .modal { box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5); }
+[data-theme="dark"] .modal-overlay { background: rgba(4, 8, 15, 0.55); }
+[data-theme="dark"] .auth-wrap { background: radial-gradient(1200px 400px at 50% -100px, #182742 0%, transparent 60%), var(--bg); }
+[data-theme="dark"] .file-list li:hover { background: #141B29; }
+[data-theme="dark"] .slider::before { background: #E6EAF2; }

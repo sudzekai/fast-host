@@ -52,7 +52,7 @@ func TestSelfSignedIssue(t *testing.T) {
 	if got := m.Provider("example.com"); got != ProviderLetsEncrypt {
 		t.Fatalf("provider for public domain: %s", got)
 	}
-	c, err := m.Issue("demo.localhost")
+	c, err := m.Issue("demo.localhost", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -138,18 +138,18 @@ hosting/
 │   ├── nginx/ssl.go         # выбор провайдера, certbot certonly --webroot, локальный CA, даты сертификата
 │   ├── metrics/sampler.go   # сбор метрик (размер папки, инкрементальный парс access.log)
 │   └── handlers/
-│       ├── handlers.go      # struct Handlers{cfg, store, sampler, web}, валидаторы, пути проектов, loadProject
-│       ├── router.go        # ServeMux: все маршруты + withLogging + staticHandler (SPA)
+│       ├── handlers.go      # struct Handlers{cfg, store, sampler, nginx}, валидаторы, пути проектов, loadProject
+│       ├── router.go        # ServeMux: API-маршруты + withLogging + cors (по --cors-origins)
 │       ├── auth.go          # login/register/logout/me/changeOwnPassword + registrationEnabled
 │       ├── projects.go      # CRUD проектов, upload zip, download, files
 │       ├── sites.go         # связка проект ↔ nginx: SyncSites, вкл/выкл, apply-ssl, автопродление, nginx-config
 │       ├── zip.go           # безопасная распаковка zip, hasIndex, mergeDir
 │       ├── metrics.go       # GET /api/projects/{id}/metrics
 │       └── admin.go         # пользователи, квоты, пароли, регистрация, stats
-└── web/                     # фронтенд (embed в бинарь)
-    ├── index.html
+└── web/                     # отдельный фронтенд-проект (хостится через nginx, не через API)
+    ├── index.html           # пути css/js — относительные
     ├── css/app.css
-    └── js/{api.js, ui.js, app.js}
+    └── js/{api.js, ui.js, app.js}   # api.js: API_BASE = https://api.sudzekai.ru/fast-host
 ```
 
 ---
@@ -159,11 +159,13 @@ hosting/
 ### Поток запроса
 
 ```
-Browser ── HTTP ──> ServeMux (router.go)
-                     ├─ /api/* → auth.Middleware → handler
-                     │          (JWT из cookie fasthost_token или Authorization: Bearer,
-                     │           user перезагружается из БД, роли проверяются)
-                     └─ /      → staticHandler (web/, SPA fallback на index.html)
+Browser ── HTTP ──> nginx
+                     ├─ /fast-host/*  → API (api.sudzekai.ru/fast-host, префикс срезается)
+                     │                  ├─ /api/* → cors → auth.Middleware → handler
+                     │                  │          (JWT из cookie fasthost_token или Authorization: Bearer,
+                     │                  │           user перезагружается из БД, роли проверяются)
+                     │                  └─ /api/health
+                     └─ /              → web/ (фронтенд, статика nginx)
 ```
 
 - Ключевое состояние сессии — `store.User` в `context` (через `httpx.SetUser/UserFrom`).
@@ -442,9 +444,10 @@ DOM-смоук: при разработке использовался node-ха
 4. **Пароли**: `PasswordHash` имеет `json:"-"` — в API никогда не утекает; в
    JSON-драйвере используется отдельная структура записи (`jsonUserRecord`) —
    поэтому хеши сохраняются на диск.
-5. **SPA-статика**: `staticHandler` читает файл и отдаёт `http.ServeContent`;
-   неизвестный путь → `index.html`. **Не менять на `http.FileServer`** — он делает
-   301 для путей, оканчивающихся на `/index.html`.
+5. **Фронтенд отделён**: API не отдаёт статику и ничего не знает про вебку. Вебка —
+   самостоятельный статический проект в `web/`, хостится через nginx, все запросы
+   идут на `API_BASE` (`https://api.sudzekai.ru/fast-host`) с `credentials:'include'`.
+   CORS разрешается только для origin из `--cors-origins` (иначе same-origin).
 6. **Время**: `ts`/`created_at` — строки `"2006-01-02 15:04:05"` (общие для всех
    драйверов). Драйверы заполняют `CreatedAt`, если пуст.
 7. **Квоты**: `disk_bytes` проектов обновляет сборщик метрик; при загрузке

@@ -31,7 +31,7 @@ echo "==> Сборка FastHost (${TAGS:-драйвер json})..."
 go build $TAGS -o bin/fasthost .
 
 echo "==> Запуск FastHost"
-echo "    Панель:   http://localhost:${PORT:-8080}"
+echo "    API:      http://localhost:${PORT:-8080}/api/health (вебка хостится отдельно через nginx)"
 echo "    Данные:   $(pwd)/users/{username}/projects/{project}"
 echo "    Драйвер:  ${DB_REQ:-json} (по умолчанию json; sqlite/mysql — с -tags db_sql)"
 [ "$LOCAL" = 1 ] && echo "    nginx:    свой экземпляр, конфиг $(pwd)/data/nginx/nginx.conf"

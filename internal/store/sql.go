@@ -75,6 +75,7 @@ func (s *SQLStorage) migrate() error {
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS users (
 			id %s,
 			username VARCHAR(191) NOT NULL,
+			email VARCHAR(254) NOT NULL DEFAULT '',
 			password_hash TEXT NOT NULL,
 			role VARCHAR(32) NOT NULL DEFAULT 'user',
 			quota_bytes BIGINT NOT NULL DEFAULT %d,
@@ -123,6 +124,7 @@ func (s *SQLStorage) migrate() error {
 		`ALTER TABLE projects ADD COLUMN ssl_issued_at VARCHAR(32) NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN ssl_expires_at VARCHAR(32) NOT NULL DEFAULT ''`,
 		`ALTER TABLE projects ADD COLUMN updated_at VARCHAR(32) NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN email VARCHAR(254) NOT NULL DEFAULT ''`,
 	}
 	for _, st := range addCols {
 		if _, err := s.db.Exec(st); err != nil && !isDuplicateColumn(err) {
@@ -149,11 +151,11 @@ func isDuplicate(err error) bool {
 		strings.Contains(msg, "constraint failed")
 }
 
-const userCols = "id, username, password_hash, role, quota_bytes, created_at"
+const userCols = "id, username, email, password_hash, role, quota_bytes, created_at"
 
 func scanUser(scanner interface{ Scan(...any) error }) (*User, error) {
 	var u User
-	if err := scanner.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.Role, &u.QuotaBytes, &u.CreatedAt); err != nil {
+	if err := scanner.Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.QuotaBytes, &u.CreatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -167,8 +169,8 @@ func (s *SQLStorage) CreateUser(u *User) error {
 		u.CreatedAt = now()
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO users (username, password_hash, role, quota_bytes, created_at) VALUES (?, ?, ?, ?, ?)`,
-		u.Username, u.PasswordHash, u.Role, u.QuotaBytes, u.CreatedAt)
+		`INSERT INTO users (username, email, password_hash, role, quota_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		u.Username, u.Email, u.PasswordHash, u.Role, u.QuotaBytes, u.CreatedAt)
 	if isDuplicate(err) {
 		return ErrDuplicate
 	}
@@ -191,13 +193,13 @@ func (s *SQLStorage) GetUserByUsername(name string) (*User, error) {
 	return scanUser(row)
 }
 
-const userDetailedCols = "u.id, u.username, u.password_hash, u.role, u.quota_bytes, u.created_at, COALESCE(SUM(p.disk_bytes),0), COUNT(p.id)"
+const userDetailedCols = "u.id, u.username, u.email, u.password_hash, u.role, u.quota_bytes, u.created_at, COALESCE(SUM(p.disk_bytes),0), COUNT(p.id)"
 
 func (s *SQLStorage) ListUsersDetailed() ([]UserDetailed, error) {
 	rows, err := s.db.Query(
 		`SELECT ` + userDetailedCols + `
 		 FROM users u LEFT JOIN projects p ON p.user_id = u.id
-		 GROUP BY u.id, u.username, u.password_hash, u.role, u.quota_bytes, u.created_at
+		 GROUP BY u.id, u.username, u.email, u.password_hash, u.role, u.quota_bytes, u.created_at
 		 ORDER BY u.id`)
 	if err != nil {
 		return nil, err
@@ -206,7 +208,7 @@ func (s *SQLStorage) ListUsersDetailed() ([]UserDetailed, error) {
 	var out []UserDetailed
 	for rows.Next() {
 		var ud UserDetailed
-		if err := rows.Scan(&ud.ID, &ud.Username, &ud.PasswordHash, &ud.Role, &ud.QuotaBytes, &ud.CreatedAt, &ud.UsedBytes, &ud.ProjectCount); err != nil {
+		if err := rows.Scan(&ud.ID, &ud.Username, &ud.Email, &ud.PasswordHash, &ud.Role, &ud.QuotaBytes, &ud.CreatedAt, &ud.UsedBytes, &ud.ProjectCount); err != nil {
 			return nil, err
 		}
 		out = append(out, ud)
@@ -219,9 +221,9 @@ func (s *SQLStorage) GetUserDetailed(id int64) (*UserDetailed, error) {
 		`SELECT `+userDetailedCols+`
 		 FROM users u LEFT JOIN projects p ON p.user_id = u.id
 		 WHERE u.id = ?
-		 GROUP BY u.id, u.username, u.password_hash, u.role, u.quota_bytes, u.created_at`, id)
+		 GROUP BY u.id, u.username, u.email, u.password_hash, u.role, u.quota_bytes, u.created_at`, id)
 	var ud UserDetailed
-	if err := row.Scan(&ud.ID, &ud.Username, &ud.PasswordHash, &ud.Role, &ud.QuotaBytes, &ud.CreatedAt, &ud.UsedBytes, &ud.ProjectCount); err != nil {
+	if err := row.Scan(&ud.ID, &ud.Username, &ud.Email, &ud.PasswordHash, &ud.Role, &ud.QuotaBytes, &ud.CreatedAt, &ud.UsedBytes, &ud.ProjectCount); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

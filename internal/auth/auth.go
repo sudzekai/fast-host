@@ -62,24 +62,39 @@ func Parse(secret, tokenStr string) (*Claims, error) {
 	return claims, nil
 }
 
-func SetCookie(w http.ResponseWriter, token string) {
+// SetCookie ставит токен в cookie. В production (HTTPS, в т.ч. за nginx)
+// cookie становится cross-site: Secure + SameSite=None, чтобы вебка на другом
+// домене могла авторизоваться через fetch с credentials:'include'.
+func SetCookie(w http.ResponseWriter, r *http.Request, token string) {
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		SameSite: sameSite,
 		MaxAge:   int(TokenTTL.Seconds()),
 	})
 }
 
-func ClearCookie(w http.ResponseWriter) {
+func ClearCookie(w http.ResponseWriter, r *http.Request) {
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		SameSite: sameSite,
 		MaxAge:   -1,
 	})
 }

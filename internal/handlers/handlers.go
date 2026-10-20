@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,21 +19,23 @@ type Handlers struct {
 	store   store.Storage
 	sampler *metrics.Sampler
 	nginx   *nginx.Manager
-	web     fs.FS
 }
 
-func New(cfg *config.Config, st store.Storage, sampler *metrics.Sampler, ngx *nginx.Manager, webFS fs.FS) *Handlers {
-	return &Handlers{cfg: cfg, store: st, sampler: sampler, nginx: ngx, web: webFS}
+func New(cfg *config.Config, st store.Storage, sampler *metrics.Sampler, ngx *nginx.Manager) *Handlers {
+	return &Handlers{cfg: cfg, store: st, sampler: sampler, nginx: ngx}
 }
 
 var (
-	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
-	userRe = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+	nameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
+	userRe  = regexp.MustCompile(`^[a-zA-Z0-9_]{3,32}$`)
+	emailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]{2,}$`)
 )
 
 func validProjectName(n string) bool { return nameRe.MatchString(n) }
 
 func validUsername(n string) bool { return userRe.MatchString(n) }
+
+func validEmail(e string) bool { return len(e) <= 254 && emailRe.MatchString(e) }
 
 func projectDir(dataDir, username, projectName string) string {
 	return filepath.Join(dataDir, "users", username, "projects", projectName)

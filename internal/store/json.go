@@ -19,6 +19,7 @@ type jsonList[T any] struct {
 type jsonUserRecord struct {
 	ID           int64  `json:"id"`
 	Username     string `json:"username"`
+	Email        string `json:"email"`
 	PasswordHash string `json:"password_hash"`
 	Role         string `json:"role"`
 	QuotaBytes   int64  `json:"quota_bytes"`
@@ -200,7 +201,7 @@ func (s *jsonStore) Close() error { return nil }
 
 func toUser(rec *jsonUserRecord) *User {
 	return &User{
-		ID: rec.ID, Username: rec.Username, PasswordHash: rec.PasswordHash,
+		ID: rec.ID, Username: rec.Username, Email: rec.Email, PasswordHash: rec.PasswordHash,
 		Role: rec.Role, QuotaBytes: rec.QuotaBytes, CreatedAt: rec.CreatedAt,
 	}
 }
@@ -233,7 +234,7 @@ func (s *jsonStore) CreateUser(u *User) error {
 		u.CreatedAt = Now()
 	}
 	rec := &jsonUserRecord{
-		ID: id, Username: u.Username, PasswordHash: u.PasswordHash,
+		ID: id, Username: u.Username, Email: u.Email, PasswordHash: u.PasswordHash,
 		Role: u.Role, QuotaBytes: u.QuotaBytes, CreatedAt: u.CreatedAt,
 	}
 	s.users = append(s.users, rec)

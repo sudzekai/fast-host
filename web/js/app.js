@@ -5,12 +5,30 @@ const state = {
   view: null,
 };
 
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('fasthost-theme', theme); } catch (e) {}
+}
+
+function initialTheme() {
+  try {
+    const saved = localStorage.getItem('fasthost-theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+  } catch (e) {}
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function toggleTheme() {
+  applyTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+}
+
 function route() {
   const hash = (location.hash || '#/').replace(/^#/, '');
   return hash.split('/').filter(Boolean);
 }
 
 async function boot() {
+  applyTheme(initialTheme());
   window.addEventListener('hashchange', () => render());
   // Квоту/роль мог поменять администратор, пока вкладка была открыта.
   document.addEventListener('visibilitychange', async () => {
@@ -106,6 +124,10 @@ function renderRegister(app) {
       h('div', { class: 'hint', html: '3-32 символа: латиница, цифры, подчёркивание' }),
     ]),
     h('div', { class: 'field' }, [
+      h('label', { html: 'Email' }),
+      h('input', { class: 'input', id: 'reg-email', type: 'email', autocomplete: 'email' }),
+    ]),
+    h('div', { class: 'field' }, [
       h('label', { html: 'Пароль' }),
       h('input', { class: 'input', id: 'reg-pass', type: 'password', autocomplete: 'new-password' }),
       h('div', { class: 'hint', html: 'Не короче 6 символов' }),
@@ -121,6 +143,7 @@ function renderRegister(app) {
     try {
       await api.post('/api/auth/register', {
         username: document.getElementById('reg-user').value.trim(),
+        email: document.getElementById('reg-email').value.trim(),
         password: document.getElementById('reg-pass').value,
       });
       await refreshMe();
@@ -165,9 +188,15 @@ function renderShell(app, parts) {
     },
   }, ICONS.logout + ' Выйти');
 
+  const themeBtn = h('button', {
+    class: 'btn btn-sm',
+    onclick: toggleTheme,
+  }, 'Тема');
+
   const topbar = h('header', { class: 'topbar' }, [
     h('div', { class: 'brand' }, [h('span', { class: 'brand-mark', html: 'F' }), h('span', {}, 'FastHost')]),
     h('div', { class: 'topbar-spacer' }),
+    themeBtn,
     h('div', { class: 'user-chip' }, [
       h('div', { class: 'avatar', html: (state.me.username || '?').slice(0, 2) }),
       h('div', { class: 'user-meta' }, [
@@ -435,7 +464,7 @@ async function renderProjectDetail(page, id) {
   const actions = h('div', { class: 'page-actions' }, [
     h('button', { class: 'btn', onclick: refreshDetail }, ICONS.refresh + ' Обновить'),
     h('button', { class: 'btn', disabled: !p.enabled, title: p.enabled ? '' : 'Проект выключен', onclick: () => window.open(p.site_url, '_blank') }, ICONS.external + ' Открыть сайт'),
-    h('button', { class: 'btn', onclick: () => { window.location = '/api/projects/' + p.id + '/download'; } }, ICONS.download + ' Скачать'),
+    h('button', { class: 'btn', onclick: () => { window.location = api.url('/api/projects/' + p.id + '/download'); } }, ICONS.download + ' Скачать'),
     h('label', { class: 'btn btn-primary' }, [
       ICONS.upload, 'Загрузить ZIP',
       h('input', {

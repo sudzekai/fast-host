@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"text/template"
 	"time"
 )
@@ -316,7 +315,7 @@ func (m *Manager) masterPID() int {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-		if err == nil && pid > 0 && syscall.Kill(pid, 0) == nil {
+		if err == nil && pid > 0 && processAlive(pid) {
 			return pid
 		}
 	}
@@ -409,6 +408,7 @@ func (m *Manager) Write(s Site, enabled bool) error {
 	if err := os.MkdirAll(s.LogDir, 0o755); err != nil {
 		return err
 	}
+	_ = os.Chmod(s.LogDir, 0o777)
 	return os.WriteFile(path, []byte(m.Render(s)), 0o644)
 }
 

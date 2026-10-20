@@ -123,7 +123,17 @@ func (h *Handlers) issueSSL(p *store.Project) error {
 	if err := h.nginx.Apply(h.site(p), true); err != nil {
 		return err
 	}
-	c, err := h.nginx.Issue(p.Domain)
+	email := ""
+	if owner, err := h.store.GetUserByID(p.UserID); err == nil {
+		email = owner.Email
+	}
+	if email == "" {
+		email = h.cfg.CertbotEmail
+	}
+	if !validEmail(email) {
+		return errors.New("невозможно выпустить сертификат: у пользователя не указан корректный email")
+	}
+	c, err := h.nginx.Issue(p.Domain, email)
 	if err != nil {
 		return err
 	}

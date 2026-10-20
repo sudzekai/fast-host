@@ -13,7 +13,8 @@
   - `json` — JSON-файлы (по умолчанию, без внешних зависимостей, работает сразу)
   - `sqlite` — SQLite (сборка `-tags db_sql`)
   - `mysql` — MySQL (сборка `-tags db_sql`)
-- **Web**: HTML + CSS + JS (vanilla), стиль Enterprise (IBM Carbon-подобный)
+- **Web**: отдельный статический проект в `web/` (HTML + CSS + JS, vanilla),
+  хостится через nginx и обращается к API по `API_BASE` (см. `web/js/api.js`)
 - **nginx / certbot**: панель пишет конфиги сайтов, проверяет `nginx -t`, перезагружает nginx и выпускает сертификаты сама
 
 ## Быстрый старт
@@ -32,7 +33,15 @@ sudo apt install golang nginx certbot               # Debian/Ubuntu
 ./run.sh --db sqlite     # SQLite (сборка с -tags db_sql)
 ```
 
-Открыть: **http://localhost:8080**
+Открыть API: **http://localhost:8080/api/health**
+
+Вебка — отдельный проект: папку `web/` раздаёт nginx, все запросы идут на
+`https://api.sudzekai.ru/fast-host` (префикс срезает nginx). Чтобы браузер
+передавал cookie между доменами, разрешите origin вебки на API:
+
+```bash
+./run.sh --cors-origins "https://panel.sudzekai.ru,http://localhost:8081"
+```
 
 Первый вход: логин **admin**, пароль **admin** (сменить в «Настройки»).
 Регистрация новых клиентов включена (страница «Регистрация»). Её можно выключить
@@ -44,7 +53,7 @@ sudo apt install golang nginx certbot               # Debian/Ubuntu
 
 ```
 hosting/
-├── main.go               # точка входа, встраивает web/ в бинарь
+├── main.go               # точка входа (только API, статику не отдаёт)
 ├── run.sh                # сборка и запуск сервера
 ├── metricsd.sh           # отдельный сервис метрик (альтернатива встроенному)
 ├── internal/
@@ -55,7 +64,7 @@ hosting/
 │   ├── metrics/          # сборщик метрик (диск, access.log)
 │   └── handlers/         # REST API + статика
 ├── cmd/metricsd/         # отдельный сервис метрик
-└── web/                  # панель (index.html, css, js)
+└── web/                  # отдельный фронтенд-проект (хостится через nginx, не через API)
 ```
 
 ### Проекты клиентов и служебные данные
@@ -155,6 +164,7 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | `--allow-registration` | `ALLOW_REGISTRATION` | вкл | самостоятельная регистрация клиентов |
 | `--no-metrics` | — | вкл (сборщик) | отключить встроенный сборщик метрик |
 | `--metrics-interval` | — | `60` | интервал сбора метрик, сек |
+| `--cors-origins` | `CORS_ORIGINS` | пусто | разрешённые origin вебки через запятую (иначе только same-origin) |
 | `--nginx-bin` | `NGINX_BIN` | `nginx` | исполняемый файл nginx |
 | `--nginx-conf` | `NGINX_CONF` | — | свой главный конфиг: панель создаёт его и сама запускает nginx (`run.sh --local`) |
 | `--nginx-sites` | `NGINX_SITES_DIR` | `data/nginx/sites` | каталог конфигов сайтов (его подключает `include`) |

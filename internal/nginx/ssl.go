@@ -93,12 +93,13 @@ func readLeaf(path string) (*x509.Certificate, error) {
 
 // Issue выпускает (или перевыпускает) сертификат. Для Let's Encrypt сайт уже должен
 // отвечать по HTTP на этом сервере: проверка идёт через /.well-known/acme-challenge/.
-func (m *Manager) Issue(domain string) (*Cert, error) {
+// email — почта владельца проекта; пустая — fallback на глобальный --certbot-email.
+func (m *Manager) Issue(domain, email string) (*Cert, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	switch m.Provider(domain) {
 	case ProviderLetsEncrypt:
-		if err := m.issueCertbot(domain); err != nil {
+		if err := m.issueCertbot(domain, email); err != nil {
 			return nil, err
 		}
 	default:
@@ -117,13 +118,16 @@ func (m *Manager) certbotDirs() []string {
 	}
 }
 
-func (m *Manager) issueCertbot(domain string) error {
-	if m.opt.CertbotEmail == "" {
+func (m *Manager) issueCertbot(domain, email string) error {
+	if email == "" {
+		email = m.opt.CertbotEmail
+	}
+	if email == "" {
 		return errors.New("не задан email для Let's Encrypt (--certbot-email)")
 	}
 	args := []string{"certonly", "--webroot", "-w", m.opt.AcmeDir,
 		"--cert-name", domain, "-d", domain,
-		"--non-interactive", "--agree-tos", "-m", m.opt.CertbotEmail, "--keep-until-expiring", "--expand"}
+		"--non-interactive", "--agree-tos", "-m", email, "--keep-until-expiring", "--expand"}
 	for _, a := range Aliases(domain)[1:] {
 		// www-имя добавляем, только если оно есть в DNS: иначе Let's Encrypt откажет во всём запросе.
 		if _, err := net.LookupHost(a); err == nil {
