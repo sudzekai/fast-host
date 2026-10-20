@@ -41,7 +41,8 @@ function h(tag, attrs = {}, children = []) {
 
 function toast(message, type = 'ok', timeout = 4000) {
   const root = document.getElementById('toast-root');
-  const t = h('div', { class: 'toast ' + type, html: message });
+  // Текстом, а не HTML: в сообщениях об ошибках бывает ввод пользователя (домен и т.п.).
+  const t = h('div', { class: 'toast ' + type }, String(message));
   root.appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; }, timeout);
   setTimeout(() => t.remove(), timeout + 350);
@@ -96,6 +97,10 @@ function formatDate(s) {
   return s.replace('T', ' ').slice(0, 16);
 }
 
+function formatNumber(n) {
+  return new Intl.NumberFormat('ru-RU').format(n || 0);
+}
+
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -106,6 +111,7 @@ function badge(status) {
     error: ['badge-err', 'Ошибка'],
     pending: ['badge-warn', 'В обработке'],
     ok: ['badge-ok', 'Готово'],
+    disabled: ['badge-neutral', 'Выключен'],
     on: ['badge-ok', 'Включён'],
     off: ['badge-neutral', 'Выключен'],
     ssl: ['badge-info', 'SSL'],

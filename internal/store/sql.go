@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "modernc.org/sqlite"
@@ -67,6 +66,11 @@ func (s *SQLStorage) Close() error { return s.db.Close() }
 
 func (s *SQLStorage) migrate() error {
 	ai, ts, eng := s.d.autoInc, s.d.tsType, s.d.engineSuf
+	metricsIdx := ""
+	if s.d.name == "mysql" {
+		ai += " PRIMARY KEY"
+		metricsIdx = ",\n\t\t\tINDEX idx_metrics_project (project_id, ts)"
+	}
 	stmts := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS users (
 			id %s,
@@ -83,10 +87,14 @@ func (s *SQLStorage) migrate() error {
 			name VARCHAR(191) NOT NULL,
 			domain VARCHAR(191) NOT NULL,
 			status VARCHAR(32) NOT NULL DEFAULT 'active',
+			enabled INTEGER NOT NULL DEFAULT 1,
 			ssl_enabled INTEGER NOT NULL DEFAULT 0,
+			ssl_issued_at VARCHAR(32) NOT NULL DEFAULT '',
+			ssl_expires_at VARCHAR(32) NOT NULL DEFAULT '',
 			path TEXT NOT NULL,
 			disk_bytes BIGINT NOT NULL DEFAULT 0,
 			created_at %s NOT NULL,
+			updated_at VARCHAR(32) NOT NULL DEFAULT '',
 			UNIQUE (domain)
 		)%s`, ai, ts, eng),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS metrics (
@@ -95,23 +103,41 @@ func (s *SQLStorage) migrate() error {
 			ts %s NOT NULL,
 			disk_bytes BIGINT NOT NULL DEFAULT 0,
 			requests_cum BIGINT NOT NULL DEFAULT 0,
-			bandwidth_cum BIGINT NOT NULL DEFAULT 0
-		)%s`, ai, ts, eng),
-		`CREATE INDEX IF NOT EXISTS idx_metrics_project ON metrics (project_id, ts)`,
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS settings (
-			key VARCHAR(191) PRIMARY KEY,
-			value TEXT NOT NULL
-		)%s`, eng),
+			bandwidth_cum BIGINT NOT NULL DEFAULT 0%s
+		)%s`, ai, ts, metricsIdx, eng),
+		// `key` — зарезервированное слово в MySQL; обратные кавычки понимают оба диалекта.
+		"CREATE TABLE IF NOT EXISTS settings (`key` VARCHAR(191) PRIMARY KEY, value TEXT NOT NULL)" + eng,
+	}
+	if s.d.name == "sqlite" {
+		// MySQL не поддерживает CREATE INDEX IF NOT EXISTS — там индекс объявлен в CREATE TABLE.
+		stmts = append(stmts, `CREATE INDEX IF NOT EXISTS idx_metrics_project ON metrics (project_id, ts)`)
 	}
 	for _, st := range stmts {
 		if _, err := s.db.Exec(st); err != nil {
 			return err
 		}
 	}
+	// Колонки, добавленные после первой версии схемы: для существующих баз.
+	addCols := []string{
+		`ALTER TABLE projects ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
+		`ALTER TABLE projects ADD COLUMN ssl_issued_at VARCHAR(32) NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN ssl_expires_at VARCHAR(32) NOT NULL DEFAULT ''`,
+		`ALTER TABLE projects ADD COLUMN updated_at VARCHAR(32) NOT NULL DEFAULT ''`,
+	}
+	for _, st := range addCols {
+		if _, err := s.db.Exec(st); err != nil && !isDuplicateColumn(err) {
+			return err
+		}
+	}
 	return nil
 }
 
-func now() string { return time.Now().Format("2006-01-02 15:04:05") }
+func isDuplicateColumn(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column")
+}
+
+func now() string { return Now() }
 
 func isDuplicate(err error) bool {
 	if err == nil {
@@ -237,11 +263,16 @@ func affected(res sql.Result) error {
 	return nil
 }
 
-const projectCols = "id, user_id, name, domain, status, ssl_enabled, path, disk_bytes, created_at"
+const projectCols = "p.id, p.user_id, p.name, p.domain, p.status, p.enabled, p.ssl_enabled, p.ssl_issued_at, p.ssl_expires_at, p.path, p.disk_bytes, p.created_at, p.updated_at"
+
+func projectDest(p *Project) []any {
+	return []any{&p.ID, &p.UserID, &p.Name, &p.Domain, &p.Status, &p.Enabled, &p.SSLEnabled,
+		&p.SSLIssuedAt, &p.SSLExpiresAt, &p.Path, &p.DiskBytes, &p.CreatedAt, &p.UpdatedAt}
+}
 
 func scanProject(row *sql.Row) (*Project, error) {
 	var p Project
-	if err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Domain, &p.Status, &p.SSLEnabled, &p.Path, &p.DiskBytes, &p.CreatedAt); err != nil {
+	if err := row.Scan(projectDest(&p)...); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -255,8 +286,9 @@ func (s *SQLStorage) CreateProject(p *Project) error {
 		p.CreatedAt = now()
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO projects (user_id, name, domain, status, ssl_enabled, path, disk_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.UserID, p.Name, p.Domain, p.Status, p.SSLEnabled, p.Path, p.DiskBytes, p.CreatedAt)
+		`INSERT INTO projects (user_id, name, domain, status, enabled, ssl_enabled, ssl_issued_at, ssl_expires_at, path, disk_bytes, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.UserID, p.Name, p.Domain, p.Status, p.Enabled, p.SSLEnabled, p.SSLIssuedAt, p.SSLExpiresAt, p.Path, p.DiskBytes, p.CreatedAt, p.UpdatedAt)
 	if isDuplicate(err) {
 		return ErrDuplicate
 	}
@@ -270,15 +302,15 @@ func (s *SQLStorage) CreateProject(p *Project) error {
 }
 
 func (s *SQLStorage) GetProjectByID(id int64) (*Project, error) {
-	return scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE id = ?`, id))
+	return scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects p WHERE p.id = ?`, id))
 }
 
 func (s *SQLStorage) GetProjectByDomain(domain string) (*Project, error) {
-	return scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE domain = ?`, domain))
+	return scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects p WHERE p.domain = ?`, domain))
 }
 
 func (s *SQLStorage) ListProjectsByUser(userID int64) ([]Project, error) {
-	rows, err := s.db.Query(`SELECT `+projectCols+` FROM projects WHERE user_id = ? ORDER BY id`, userID)
+	rows, err := s.db.Query(`SELECT `+projectCols+` FROM projects p WHERE p.user_id = ? ORDER BY p.id`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +318,7 @@ func (s *SQLStorage) ListProjectsByUser(userID int64) ([]Project, error) {
 	var out []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Domain, &p.Status, &p.SSLEnabled, &p.Path, &p.DiskBytes, &p.CreatedAt); err != nil {
+		if err := rows.Scan(projectDest(&p)...); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -296,7 +328,7 @@ func (s *SQLStorage) ListProjectsByUser(userID int64) ([]Project, error) {
 
 func (s *SQLStorage) ListAllProjects() ([]Project, error) {
 	rows, err := s.db.Query(
-		`SELECT p.id, p.user_id, p.name, p.domain, p.status, p.ssl_enabled, p.path, p.disk_bytes, p.created_at, u.username
+		`SELECT ` + projectCols + `, u.username
 		 FROM projects p JOIN users u ON u.id = p.user_id ORDER BY p.id`)
 	if err != nil {
 		return nil, err
@@ -305,7 +337,7 @@ func (s *SQLStorage) ListAllProjects() ([]Project, error) {
 	var out []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Domain, &p.Status, &p.SSLEnabled, &p.Path, &p.DiskBytes, &p.CreatedAt, &p.Username); err != nil {
+		if err := rows.Scan(append(projectDest(&p), &p.Username)...); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -315,8 +347,12 @@ func (s *SQLStorage) ListAllProjects() ([]Project, error) {
 
 func (s *SQLStorage) UpdateProject(p *Project) error {
 	res, err := s.db.Exec(
-		`UPDATE projects SET name = ?, domain = ?, status = ?, ssl_enabled = ?, path = ?, disk_bytes = ? WHERE id = ?`,
-		p.Name, p.Domain, p.Status, p.SSLEnabled, p.Path, p.DiskBytes, p.ID)
+		`UPDATE projects SET name = ?, domain = ?, status = ?, enabled = ?, ssl_enabled = ?, ssl_issued_at = ?, ssl_expires_at = ?,
+		 path = ?, disk_bytes = ?, updated_at = ? WHERE id = ?`,
+		p.Name, p.Domain, p.Status, p.Enabled, p.SSLEnabled, p.SSLIssuedAt, p.SSLExpiresAt, p.Path, p.DiskBytes, p.UpdatedAt, p.ID)
+	if isDuplicate(err) {
+		return ErrDuplicate
+	}
 	if err != nil {
 		return err
 	}
@@ -367,7 +403,7 @@ func (s *SQLStorage) ListMetrics(projectID int64, limit int) ([]Metric, error) {
 	rows, err := s.db.Query(
 		`SELECT id, project_id, ts, disk_bytes, requests_cum, bandwidth_cum
 		 FROM (SELECT id, project_id, ts, disk_bytes, requests_cum, bandwidth_cum
-		       FROM metrics WHERE project_id = ? ORDER BY id DESC LIMIT ?)
+		       FROM metrics WHERE project_id = ? ORDER BY id DESC LIMIT ?) AS recent
 		 ORDER BY id ASC`, projectID, limit)
 	if err != nil {
 		return nil, err
@@ -386,7 +422,7 @@ func (s *SQLStorage) ListMetrics(projectID int64, limit int) ([]Metric, error) {
 
 func (s *SQLStorage) GetSetting(key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	err := s.db.QueryRow("SELECT value FROM settings WHERE `key` = ?", key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -395,11 +431,14 @@ func (s *SQLStorage) GetSetting(key string) (string, error) {
 
 func (s *SQLStorage) SetSetting(key, value string) error {
 	if s.d.name == "mysql" {
-		_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE value = VALUES(value)`, key, value)
+		_, err := s.db.Exec("INSERT INTO settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = VALUES(value)", key, value)
 		return err
 	}
-	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	_, err := s.db.Exec("INSERT INTO settings (`key`, value) VALUES (?, ?) ON CONFLICT(`key`) DO UPDATE SET value = excluded.value", key, value)
+	return err
+}
+
+func (s *SQLStorage) DeleteSetting(key string) error {
+	_, err := s.db.Exec("DELETE FROM settings WHERE `key` = ?", key)
 	return err
 }

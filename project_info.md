@@ -12,15 +12,16 @@
 
 - **Клиент**: логин/пароль → панель управления → создаёт проект, указывает домен,
   загружает ZIP с сайтом (обязателен `index.html`). При создании проекта панель
-  сразу генерирует **nginx-конфиг** и скрипты для **SSL (certbot)**.
+  сразу подключает сайт к **nginx**; по кнопке выпускает **SSL** (certbot / локальный CA)
+  и включает редирект 80 → 443. Проект можно выключить (домен перестаёт обслуживаться).
 - **Админ**: список пользователей, их проекты, лимиты хранения (квоты), смена
   паролей, пути к папкам проектов, вкл/выкл регистрации.
 - **Метрики**: сбор (размер на диске + запросы/трафик из nginx access.log) и
   графики в карточке проекта.
 
-nginx и certbot на машине разработки **не установлены**: панель только пишет
-конфиги/скрипты в `.conf/` проекта, реальные команды выполняются опционально
-(флаг `--live-ssl`) на домашнем/боевом сервере.
+nginx и certbot используются **всегда** (флага `--live-ssl` больше нет). Локально
+`./run.sh --local` запускает собственный экземпляр nginx (`data/nginx/nginx.conf`);
+для доменов `*.localhost`/`*.test`/… сертификат подписывает локальный CA панели.
 
 ---
 
@@ -89,7 +90,11 @@ curl -b c.txt localhost:8080/api/projects/1/files
 | `--admin-user` | `ADMIN_USERNAME` | `admin` | первый администратор |
 | `--admin-pass` | `ADMIN_PASSWORD` | `admin` | его пароль |
 | `--certbot-email` | `CERTBOT_EMAIL` | `admin@example.com` | email для Let's Encrypt |
-| `--live-ssl` | `ENABLE_LIVE_SSL` | выкл | реально выполнять certbot/nginx при «Применить SSL» |
+| `--nginx-conf` | `NGINX_CONF` | — | управляемый режим: панель пишет главный конфиг и сама запускает nginx |
+| `--nginx-sites` | `NGINX_SITES_DIR` | `data/nginx/sites` | каталог `{домен}.conf`, подключаемый `include` |
+| `--nginx-reload-cmd` | `NGINX_RELOAD_CMD` | — | своя команда reload (иначе `nginx -s reload`) |
+| `--ssl-provider` | `SSL_PROVIDER` | `auto` | `auto` / `letsencrypt` / `selfsigned` |
+| `--ssl-staging` | `SSL_STAGING` | выкл | тестовые сертификаты Let's Encrypt |
 | `--allow-registration` | `ALLOW_REGISTRATION` | вкл | жёсткий флаг регистрации (блокирует переключатель в админке) |
 | `--no-metrics` | — | выкл | отключить встроенный сборщик метрик |
 | `--metrics-interval` | — | `60` | интервал сбора метрик, сек |
@@ -129,13 +134,15 @@ hosting/
 │   │   └── sql_registry_{sql,nosql}.go  # подключение/заглушка SQL по build-тегу
 │   ├── auth/auth.go         # JWT (подпись/парс), bcrypt, middleware (cookie/Bearer, роли), cookie-set/clear
 │   ├── httpx/httpx.go       # WriteJSON/ReadJSON/Error/ErrStatus, UserFrom(r) (контекст)
-│   ├── nginx/nginx.go       # ValidateDomain, генерация nginx.conf + certbot.sh + install.sh, ApplyCertbot
+│   ├── nginx/nginx.go       # Manager: шаблоны server-блоков, Write/Apply (nginx -t + reload с откатом), default_server, управляемый режим
+│   ├── nginx/ssl.go         # выбор провайдера, certbot certonly --webroot, локальный CA, даты сертификата
 │   ├── metrics/sampler.go   # сбор метрик (размер папки, инкрементальный парс access.log)
 │   └── handlers/
 │       ├── handlers.go      # struct Handlers{cfg, store, sampler, web}, валидаторы, пути проектов, loadProject
 │       ├── router.go        # ServeMux: все маршруты + withLogging + staticHandler (SPA)
 │       ├── auth.go          # login/register/logout/me/changeOwnPassword + registrationEnabled
-│       ├── projects.go      # CRUD проектов, upload zip, download, files, nginx-config, apply-ssl
+│       ├── projects.go      # CRUD проектов, upload zip, download, files
+│       ├── sites.go         # связка проект ↔ nginx: SyncSites, вкл/выкл, apply-ssl, автопродление, nginx-config
 │       ├── zip.go           # безопасная распаковка zip, hasIndex, mergeDir
 │       ├── metrics.go       # GET /api/projects/{id}/metrics
 │       └── admin.go         # пользователи, квоты, пароли, регистрация, stats
@@ -209,7 +216,8 @@ type UserDetailed struct {   // User + UsedBytes (сумма disk_bytes прое
 }
 type Project struct {        // projects
     ID, UserID, Username (подставляется при листах), Name, Domain,
-    Status ("active"|"error"), SSLEnabled, Path (абсолютный), DiskBytes, CreatedAt
+    Status ("active"|"error"), Enabled, SSLEnabled, SSLIssuedAt, SSLExpiresAt,
+    Path (абсолютный, в API — только админу), DiskBytes, CreatedAt, UpdatedAt (последняя загрузка)
 }
 type Metric struct {         // metrics
     ID, ProjectID, TS ("2006-01-02 15:04:05"), DiskBytes, RequestsCum, BandwidthCum
@@ -244,8 +252,9 @@ type Metric struct {         // metrics
 | GET | `/api/projects/{id}/download` | владелец/admin | zip файлов сайта (без `.conf`) |
 | GET | `/api/projects/{id}/files` | владелец/admin | `{files:[{path,dir,size}]}` без `.conf` |
 | GET | `/api/projects/{id}/metrics` | владелец/admin | `{disk_bytes, requests_cum, bandwidth_cum, series[]}` (последние 120) |
-| GET | `/api/projects/{id}/nginx-config` | владелец/admin | `{config}` (текст `.conf/nginx.conf`) |
-| POST | `/api/projects/{id}/apply-ssl` | владелец/admin | выполняет certbot (или инструкцию в тестовом режиме) |
+| PUT | `/api/projects/{id}/enabled` | владелец/admin | `{enabled}` — вкл/выкл сайт в nginx |
+| POST | `/api/projects/{id}/apply-ssl` | владелец/admin | выпуск сертификата, HTTPS + редирект 80 → 443 → `{project, provider}` |
+| GET | `/api/projects/{id}/nginx-config` | admin | `{config, enabled}` — сгенерированный конфиг сайта |
 | GET | `/api/admin/users` | admin | `{users: UserDetailed[]}` |
 | GET | `/api/admin/users/{id}` | admin | `{user, projects[], data_dir}` |
 | PUT | `/api/admin/users/{id}/password` | admin | `{new_password}` |
@@ -265,14 +274,11 @@ type Metric struct {         // metrics
    приводится `lowerASCII`); `domain` — `nginx.ValidateDomain` (hostname с точкой
    или `localhost`).
 2. Проверка, что домен не занят (`GetProjectByDomain`).
-3. Создание каталога `{dataDir}/users/{username}/projects/{name}/` и внутри
-   `.conf/`:
-   - `nginx.conf` — конфиг сервера (listen 80, `server_name`, root, try_files,
-     access/error log в `.conf/`, блоки с комментариями по подключению и SSL);
-   - `certbot.sh` — получение сертификата Let's Encrypt;
-   - `install.sh` — копирование конфига в `/etc/nginx/sites-available|enabled`.
-4. `CreateProject` (статус `active`).
-5. Путь в БД — **абсолютный** (`dataDir` резолвится через `filepath.Abs`).
+3. Создание каталога `{dataDir}/users/{username}/projects/{name}/.conf/` (логи nginx).
+4. `nginx.Apply`: пишет `{sites}/{домен}.conf` (только директивы, без комментариев),
+   `nginx -t` → reload; при ошибке файл откатывается, каталог удаляется.
+5. `CreateProject` (статус `active`, `enabled = true`).
+6. Путь в БД — **абсолютный**; в API отдаётся только администратору (`publicProject`).
 
 ### 9.2 Загрузка ZIP (`POST /api/projects/{id}/upload`)
 
@@ -282,15 +288,17 @@ type Metric struct {         // metrics
 - Извлечение **в staging** (`{проект}/.conf/.upload-staging`): проверка пути
   (`..`, абсолютные пути), лимит размера, затем `hasIndex` — обязателен
   `index.html` или `index.htm` в корне.
+- Квота — **владельца** проекта (даже если загружает админ).
 - Успех → `mergeDir` (перемещение файлов в корень проекта), пересчёт `dirSize`,
-  `UpdateProjectDisk`. Ошибка → staging удаляется, файлы не трогаются.
+  `updated_at` = сейчас («последнее изменение»). Ошибка → staging удаляется, файлы не трогаются.
 
 ### 9.3 Метрики
 
 - **Сборщик**: встроенный goroutine в `main.go` (по умолчанию) или отдельный
   сервис `cmd/metricsd` (тот же контракт БД). Каждые `--metrics-interval` сек:
   - `dirSize` папки проекта (включая `.conf`);
-  - инкрементальный парс `{проект}/.conf/access.log` (offset в памяти `Sampler`),
+  - инкрементальный парс `{проект}/.conf/access.log` (offset хранится в settings
+    `log_offset:{id}`, чтобы после перезапуска запросы не считались повторно),
     извлечение `$body_bytes_sent` (regexp `"\s+\d{3}\s+(\d+)\s+"`); при
     ротации/усечении лога offset сбрасывается;
   - в БД пишется `Metric{disk_bytes, requests_cum, bandwidth_cum}` (кумулятивные
@@ -300,11 +308,23 @@ type Metric struct {         // metrics
 
 ### 9.4 SSL / certbot
 
-- Кнопка «Применить SSL» → `POST .../apply-ssl` → `nginx.ApplyCertbot`.
-- Без `--live-ssl`: возвращает инструкцию и пути к `.conf/certbot.sh` и
-  `.conf/install.sh` (тестовый режим; `ssl_enabled` не ставится).
-- С `--live-ssl`: выполняет `bash {проект}/.conf/certbot.sh` (nginx -t → reload →
-  certbot --nginx). Ошибка → статус проекта `error`.
+- Кнопка «Выпустить SSL» → `POST .../apply-ssl` → `issueSSL`: сайт применяется по HTTP
+  (нужен для HTTP-01), `nginx.Issue` выпускает сертификат, конфиг перегенерируется с
+  блоком 443 и `return 301 https://…` на 80 (кроме `/.well-known/acme-challenge/`).
+- Провайдер: `auto` → `selfsigned` для `localhost`, `*.localhost`, `*.test`, `*.local`,
+  `*.lan`, `*.internal`, …; иначе `letsencrypt` (`certbot certonly --webroot`,
+  `--config-dir data/letsencrypt` — root не нужен; www добавляется, если резолвится).
+- Даты `ssl_issued_at`/`ssl_expires_at` читаются из сертификата (x509 NotBefore/NotAfter).
+- `RenewCertificates` раз в 12 ч перевыпускает сертификаты, до истечения которых < 30 дней.
+
+### 9.4.1 Вкл/выкл и удаление
+
+- `PUT .../enabled {enabled}`: выключение удаляет `{sites}/{домен}.conf` и перезагружает
+  nginx; запросы к домену ловит `00-default.conf` (`return 444` / `ssl_reject_handshake`).
+- `DELETE`: `nginx.Remove` (конфиг + сертификаты, `certbot delete`), затем `os.RemoveAll`
+  папки (только внутри `{dataDir}/users`), метрики, offset лога, запись в БД.
+- При старте `SyncSites` перегенерирует конфиги всех проектов и удаляет устаревшие
+  `.conf/nginx.conf|install.sh|certbot.sh` от прошлых версий.
 
 ### 9.5 Регистрация (вкл/выкл)
 
@@ -326,15 +346,16 @@ type Metric struct {         // metrics
 {dataDir}/users/{username}/projects/{projectname}/
 ├── index.html …           ← файлы сайта (из zip)
 └── .conf/                 ← системные файлы проекта
-    ├── nginx.conf         ← конфиг nginx (генерируется при создании)
-    ├── certbot.sh         ← SSL-скрипт (генерируется)
-    ├── install.sh         ← установка конфига в систему (генерируется)
     ├── access.log         ← пишет nginx (для метрик)
     └── error.log
+
+{dataDir}/data/nginx/sites/{домен}.conf   ← конфиг включённого сайта
+{dataDir}/data/ssl/{домен}/               ← самоподписанный сертификат; ssl/ca.pem — локальный CA
+{dataDir}/data/letsencrypt/live/{домен}/  ← сертификат Let's Encrypt
 ```
 
-`.conf` скрыт от листинга файлов и от download-архива; в nginx-конфиге закрыт
-`location ~ /\.conf { deny all; }`.
+`.conf` скрыт от листинга файлов и от download-архива; в nginx-конфиге закрыты все
+dot-пути, кроме `/.well-known/` (`location ~ /\.(?!well-known/) { return 404; }`).
 
 ---
 
@@ -429,13 +450,14 @@ DOM-смоук: при разработке использовался node-ха
 7. **Квоты**: `disk_bytes` проектов обновляет сборщик метрик; при загрузке
    используется сумма по БД (может отставать на один цикл сбора). Удаление
    проекта — `os.RemoveAll(path)` + удаление метрик.
-8. **Секреты по умолчанию**: `admin/admin`, dev JWT-секрет — только для
-   разработки; перед продом сменить (`--admin-pass`, `--secret`).
-9. **nginx/certbot не установлены здесь**: генерация конфигов безопасна, но
-   «Применить SSL» выполняет команды только с `--live-ssl`. Для домашнего теста —
-   `install.sh` + `certbot.sh` из `.conf/` проекта (README раздел «Тестирование
-   nginx + SSL дома»).
-10. **Ограничения валидации**: имя проекта 2–64 символа (a-z0-9_-), логин 3–32
+8. **Секреты по умолчанию**: `admin/admin` — только для разработки (`--admin-pass`).
+   JWT-секрет без `--secret` генерируется случайно и хранится в settings `jwt_secret`.
+9. **nginx reload асинхронный**: `Manager.Reload` после сигнала ждёт смены воркеров
+   (`pgrep -P master`), иначе запрос сразу после API-вызова попадает на старый конфиг.
+   Системному nginx нужен `include {sites}/*.conf;` и право на reload.
+10. **JSON-драйвер** хранит записи по указателям (`[]*record`): мапы-индексы не должны
+    ссылаться на элементы среза значений — append/удаление их инвалидируют.
+11. **Ограничения валидации**: имя проекта 2–64 символа (a-z0-9_-), логин 3–32
     (латиница/цифры/_ ), пароль ≥6, домен — hostname с точкой или `localhost`,
     квота 100 МБ–100 ГБ.
 

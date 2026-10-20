@@ -27,4 +27,5 @@ type Storage interface {
 
 	GetSetting(key string) (string, error)
 	SetSetting(key, value string) error
+	DeleteSetting(key string) error
 }

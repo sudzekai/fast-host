@@ -1,8 +1,10 @@
 # FastHost — панель управления хостингом
 
 Корпоративный хостинг-контроллер: клиенты загружают ZIP с сайтом (`index.html`),
-указывают домен — панель сама генерирует nginx-конфиг и скрипты для SSL (certbot).
-Администратор управляет пользователями, квотами и видит путь к папкам проектов.
+указывают домен — панель сама подключает сайт к nginx, выпускает SSL-сертификат
+(Let's Encrypt через certbot или локальный CA для `*.localhost`/`*.test`) и
+включает редирект 80 → 443. Администратор управляет пользователями, квотами и видит
+пути к папкам проектов (клиенту путь не показывается).
 
 ## Стек
 
@@ -12,13 +14,19 @@
   - `sqlite` — SQLite (сборка `-tags db_sql`)
   - `mysql` — MySQL (сборка `-tags db_sql`)
 - **Web**: HTML + CSS + JS (vanilla), стиль Enterprise (IBM Carbon-подобный)
-- **nginx / certbot**: генерируются конфиги и скрипты; реальные команды **закомментированы/выключены** до установки на домашнем сервере
+- **nginx / certbot**: панель пишет конфиги сайтов, проверяет `nginx -t`, перезагружает nginx и выпускает сертификаты сама
 
 ## Быстрый старт
 
+Нужны Go, nginx и (для публичных доменов) certbot:
+
 ```bash
-cd hosting
-./run.sh                 # драйвер json, порт 8080
+brew install go nginx certbot                       # macOS
+sudo apt install golang nginx certbot               # Debian/Ubuntu
+```
+
+```bash
+./run.sh --local         # панель сама запускает nginx со своим конфигом, порт панели 8080
 # или
 ./run.sh --port 9090
 ./run.sh --db sqlite     # SQLite (сборка с -tags db_sql)
@@ -50,50 +58,60 @@ hosting/
 └── web/                  # панель (index.html, css, js)
 ```
 
-### Проекты клиентов
-
-Всё лежит внутри каталога приложения:
+### Проекты клиентов и служебные данные
 
 ```
 users/
-└── {username}/
-    └── projects/
-        └── {projectname}/
-            ├── index.html ...   # файлы сайта (из загруженного ZIP)
-            └── .conf/           # системные файлы проекта
-                ├── nginx.conf   # конфиг nginx для домена
-                ├── install.sh   # установка конфига в /etc/nginx
-                ├── certbot.sh   # получение SSL-сертификата
-                ├── access.log   # access-лог nginx (для метрик)
-                └── error.log
+└── {username}/projects/{projectname}/
+    ├── index.html ...      # файлы сайта (из загруженного ZIP)
+    └── .conf/              # служебное, закрыто от веба
+        ├── access.log      # пишет nginx (для метрик)
+        └── error.log
+data/
+├── nginx/
+│   ├── nginx.conf          # только в режиме --local / --nginx-conf
+│   └── sites/              # конфиги сайтов: {домен}.conf (+ 00-default.conf)
+├── ssl/                    # локальный CA (ca.pem) и самоподписанные сертификаты
+├── letsencrypt/            # certbot --config-dir (работает без root)
+└── acme/                   # webroot для проверки Let's Encrypt
 ```
 
-## Тестирование nginx + SSL дома (nginx/certbot НЕ установлены здесь)
+Включённый проект = файл `data/nginx/sites/{домен}.conf`. Выключение удаляет его и
+перезагружает nginx — домен перестаёт обслуживаться (заглушка `default_server`
+закрывает соединение, запрос не попадает на чужой сайт). Удаление проекта убирает
+конфиг, сертификаты, метрики и папку проекта с диска.
 
-Панель **не трогает систему**: при создании проекта она пишет только `.conf/` внутри
-папки проекта. Чтобы включить сайт на домашнем сервере (где nginx установлен):
+## nginx и SSL
+
+Панель всё делает сама: при создании проекта пишет конфиг, проверяет `nginx -t`
+(при ошибке откатывает файл, чтобы не сломать остальные сайты) и перезагружает nginx.
+В конфигах только рабочие директивы, без комментариев.
+
+**Локально (macOS / разработка)** — `./run.sh --local`: панель генерирует
+`data/nginx/nginx.conf` и запускает свой экземпляр nginx на 80/443 (на macOS root не
+нужен). Для доменов `*.localhost`, `*.test`, `*.local` и т.п. Let's Encrypt невозможен,
+поэтому сертификат подписывается локальным CA панели (`data/ssl/ca.pem`). Проверка:
 
 ```bash
-# 1) Убедиться, что домен указывает на IP этого сервера (A-запись)
-#    или для теста добавьте в /etc/hosts:  127.0.0.1  mydomain.example
-
-# 2) Установить конфиг в nginx (из папки проекта):
-sudo bash users/{username}/projects/{projectname}/.conf/install.sh
-
-# 3) Получить SSL (кнопка «Применить SSL» в панели или вручную):
-sudo bash users/{username}/projects/{projectname}/.conf/certbot.sh
-#    Требуется: apt install certbot python3-certbot-nginx
-
-# 4) Проверить: nginx -t && systemctl reload nginx
+curl http://demo.localhost/                                  # *.localhost резолвится в 127.0.0.1
+curl -I http://demo.localhost/                               # после SSL: 301 → https
+curl --cacert data/ssl/ca.pem https://demo.localhost/
 ```
 
-Для кнопки «Применить SSL», чтобы она **реально** выполняла certbot, запустите сервер:
+Чтобы браузер не ругался, добавьте `data/ssl/ca.pem` в доверенные (Связка ключей → «Всегда доверять»).
 
-```bash
-./run.sh --live-ssl                 # или env ENABLE_LIVE_SSL=1
+**Сервер с системным nginx** — без `--local`. В `http {}` основного конфига nginx добавьте
+
+```nginx
+include /путь/к/fast-host/data/nginx/sites/*.conf;
 ```
 
-Без `--live-ssl` кнопка показывает инструкцию и сгенерированные скрипты (безопасный тестовый режим).
+и уберите стандартный сайт с `default_server` (панель ставит свою заглушку; отключить —
+`--nginx-default-server=false`). Панель должна иметь право перезагружать nginx: запуск от
+root или `--nginx-reload-cmd "sudo systemctl reload nginx"`. Сертификаты Let's Encrypt
+выпускаются через `certbot certonly --webroot` (домен должен указывать на этот сервер,
+порт 80 открыт), продлеваются панелью автоматически за 30 дней до истечения. Для проверки
+без лимитов Let's Encrypt — `--ssl-staging`.
 
 ## База данных: единый контракт для JSON / SQLite / MySQL
 
@@ -127,18 +145,27 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 
 | Флаг | Env | По умолчанию | Описание |
 |---|---|---|---|
-| `--port` | `PORT` | `8080` | HTTP-порт |
+| `--port` | `PORT` | `8080` | HTTP-порт панели |
 | `--db` | `DB_DRIVER` | `json` | `json`, `sqlite` (нужен `-tags db_sql`), `mysql` |
 | `--dsn` | `DB_DSN` | `data/fasthost-json` | каталог для json / путь к файлу SQLite / DSN MySQL |
 | `--data` | `DATA_DIR` | `.` | корень приложения; внутри создаётся `users/{login}/projects/{имя}` |
-| `--secret` | `JWT_SECRET` | dev-значение | секрет подписи JWT |
+| `--secret` | `JWT_SECRET` | случайный, хранится в БД | секрет подписи JWT |
 | `--admin-user` | `ADMIN_USERNAME` | `admin` | первый администратор |
 | `--admin-pass` | `ADMIN_PASSWORD` | `admin` | пароль первого администратора |
-| `--certbot-email` | `CERTBOT_EMAIL` | `admin@example.com` | email для Let's Encrypt |
-| `--live-ssl` | `ENABLE_LIVE_SSL` | выкл | реально запускать certbot |
 | `--allow-registration` | `ALLOW_REGISTRATION` | вкл | самостоятельная регистрация клиентов |
 | `--no-metrics` | — | вкл (сборщик) | отключить встроенный сборщик метрик |
 | `--metrics-interval` | — | `60` | интервал сбора метрик, сек |
+| `--nginx-bin` | `NGINX_BIN` | `nginx` | исполняемый файл nginx |
+| `--nginx-conf` | `NGINX_CONF` | — | свой главный конфиг: панель создаёт его и сама запускает nginx (`run.sh --local`) |
+| `--nginx-sites` | `NGINX_SITES_DIR` | `data/nginx/sites` | каталог конфигов сайтов (его подключает `include`) |
+| `--nginx-reload-cmd` | `NGINX_RELOAD_CMD` | `nginx -s reload` | своя команда перезагрузки |
+| `--nginx-http-port` / `--nginx-https-port` | `NGINX_HTTP_PORT` / `NGINX_HTTPS_PORT` | `80` / `443` | порты сайтов |
+| `--nginx-default-server` | `NGINX_DEFAULT_SERVER` | вкл | заглушка для неизвестных/выключенных доменов |
+| `--ssl-provider` | `SSL_PROVIDER` | `auto` | `auto` (локальные домены — свой CA, остальные — Let's Encrypt), `letsencrypt`, `selfsigned` |
+| `--ssl-staging` | `SSL_STAGING` | выкл | тестовый сервер Let's Encrypt |
+| `--certbot-bin` | `CERTBOT_BIN` | `certbot` | исполняемый файл certbot |
+| `--certbot-email` | `CERTBOT_EMAIL` | `admin@example.com` | email для Let's Encrypt |
+| `--certbot-dir`, `--ssl-dir`, `--acme-dir` | `CERTBOT_DIR`, `SSL_DIR`, `ACME_DIR` | `data/…` | каталоги сертификатов и ACME |
 
 ## Метрики
 
@@ -160,13 +187,14 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | GET | `/api/projects` | user | свои проекты |
 | POST | `/api/projects` | user | создать проект (домен) |
 | GET | `/api/projects/{id}` | владелец/admin | детали |
-| DELETE | `/api/projects/{id}` | владелец/admin | удалить проект |
+| DELETE | `/api/projects/{id}` | владелец/admin | удалить проект (конфиг, сертификат, файлы с диска) |
 | POST | `/api/projects/{id}/upload` | владелец/admin | загрузить ZIP с сайтом |
 | GET | `/api/projects/{id}/download` | владелец/admin | скачать файлы сайта |
 | GET | `/api/projects/{id}/files` | владелец/admin | список файлов |
 | GET | `/api/projects/{id}/metrics` | владелец/admin | метрики и ряд точек |
-| GET | `/api/projects/{id}/nginx-config` | владелец/admin | сгенерированный конфиг |
-| POST | `/api/projects/{id}/apply-ssl` | владелец/admin | certbot (или инструкция) |
+| PUT | `/api/projects/{id}/enabled` | владелец/admin | `{enabled}` — включить/выключить сайт в nginx |
+| POST | `/api/projects/{id}/apply-ssl` | владелец/admin | выпустить сертификат, включить HTTPS и редирект 80 → 443 |
+| GET | `/api/projects/{id}/nginx-config` | admin | сгенерированный конфиг сайта |
 | GET | `/api/admin/users` | admin | список пользователей с квотами |
 | GET | `/api/admin/users/{id}` | admin | пользователь + проекты + пути |
 | PUT | `/api/admin/users/{id}/password` | admin | смена пароля пользователя |

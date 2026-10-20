@@ -34,7 +34,7 @@ func (h *Handlers) adminGetUser(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"user":     ud,
-		"projects": projects,
+		"projects": h.publicProjects(r, projects),
 		"data_dir": h.cfg.DataDir,
 	})
 }
