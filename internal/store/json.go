@@ -24,6 +24,7 @@ type jsonUserRecord struct {
 	Role         string `json:"role"`
 	QuotaBytes   int64  `json:"quota_bytes"`
 	CreatedAt    string `json:"created_at"`
+	APIKey       string `json:"api_key"`
 }
 
 // Disabled вместо Enabled: у записей, сохранённых до появления поля,
@@ -202,7 +203,7 @@ func (s *jsonStore) Close() error { return nil }
 func toUser(rec *jsonUserRecord) *User {
 	return &User{
 		ID: rec.ID, Username: rec.Username, Email: rec.Email, PasswordHash: rec.PasswordHash,
-		Role: rec.Role, QuotaBytes: rec.QuotaBytes, CreatedAt: rec.CreatedAt,
+		Role: rec.Role, QuotaBytes: rec.QuotaBytes, CreatedAt: rec.CreatedAt, APIKey: rec.APIKey,
 	}
 }
 
@@ -233,9 +234,12 @@ func (s *jsonStore) CreateUser(u *User) error {
 	if u.CreatedAt == "" {
 		u.CreatedAt = Now()
 	}
+	if u.APIKey == "" {
+		u.APIKey = NewAPIKey()
+	}
 	rec := &jsonUserRecord{
 		ID: id, Username: u.Username, Email: u.Email, PasswordHash: u.PasswordHash,
-		Role: u.Role, QuotaBytes: u.QuotaBytes, CreatedAt: u.CreatedAt,
+		Role: u.Role, QuotaBytes: u.QuotaBytes, CreatedAt: u.CreatedAt, APIKey: u.APIKey,
 	}
 	s.users = append(s.users, rec)
 	s.userByID[id] = rec
@@ -262,6 +266,20 @@ func (s *jsonStore) GetUserByUsername(name string) (*User, error) {
 		return nil, ErrNotFound
 	}
 	return toUser(rec), nil
+}
+
+func (s *jsonStore) GetUserByAPIKey(key string) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key == "" {
+		return nil, ErrNotFound
+	}
+	for _, rec := range s.users {
+		if rec.APIKey == key {
+			return toUser(rec), nil
+		}
+	}
+	return nil, ErrNotFound
 }
 
 func (s *jsonStore) usageLocked(userID int64) (used int64, count int) {
@@ -315,6 +333,17 @@ func (s *jsonStore) UpdateUserQuota(id int64, quota int64) error {
 		return ErrNotFound
 	}
 	rec.QuotaBytes = quota
+	return s.saveUsers()
+}
+
+func (s *jsonStore) UpdateUserAPIKey(id int64, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.userByID[id]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.APIKey = key
 	return s.saveUsers()
 }
 

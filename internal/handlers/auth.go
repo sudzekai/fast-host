@@ -11,6 +11,7 @@ import (
 type loginReq struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Remember bool   `json:"remember"`
 }
 
 type registerReq struct {
@@ -30,12 +31,16 @@ func (h *Handlers) login(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusUnauthorized, "неверный логин или пароль")
 		return
 	}
-	token, err := auth.Sign(h.cfg.JWTSecret, u, auth.TokenTTL)
+	ttl := auth.TokenTTL
+	if req.Remember {
+		ttl = auth.RememberTTL
+	}
+	token, err := auth.Sign(h.cfg.JWTSecret, u, ttl)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка авторизации")
 		return
 	}
-	auth.SetCookie(w, r, token)
+	auth.SetCookie(w, r, token, ttl)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
@@ -98,7 +103,7 @@ func (h *Handlers) register(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка авторизации")
 		return
 	}
-	auth.SetCookie(w, r, token)
+	auth.SetCookie(w, r, token, auth.TokenTTL)
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"user": u})
 }
 
@@ -114,8 +119,8 @@ func (h *Handlers) me(w http.ResponseWriter, r *http.Request) {
 		used += p.DiskBytes
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"user":         u,
-		"used_bytes":   used,
+		"user":          u,
+		"used_bytes":    used,
 		"project_count": len(projects),
 	})
 }

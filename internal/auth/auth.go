@@ -15,7 +15,9 @@ import (
 
 const (
 	CookieName = "fasthost_token"
-	TokenTTL   = 12 * time.Hour
+	// TokenTTL — обычная сессия; RememberTTL — сессия с включённым «Запомнить меня».
+	TokenTTL    = 12 * time.Hour
+	RememberTTL = 30 * 24 * time.Hour
 )
 
 type Claims struct {
@@ -65,7 +67,7 @@ func Parse(secret, tokenStr string) (*Claims, error) {
 // SetCookie ставит токен в cookie. В production (HTTPS, в т.ч. за nginx)
 // cookie становится cross-site: Secure + SameSite=None, чтобы вебка на другом
 // домене могла авторизоваться через fetch с credentials:'include'.
-func SetCookie(w http.ResponseWriter, r *http.Request, token string) {
+func SetCookie(w http.ResponseWriter, r *http.Request, token string, ttl time.Duration) {
 	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	sameSite := http.SameSiteLaxMode
 	if secure {
@@ -78,7 +80,7 @@ func SetCookie(w http.ResponseWriter, r *http.Request, token string) {
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: sameSite,
-		MaxAge:   int(TokenTTL.Seconds()),
+		MaxAge:   int(ttl.Seconds()),
 	})
 }
 

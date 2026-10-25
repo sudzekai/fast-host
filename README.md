@@ -1,9 +1,9 @@
 # FastHost — панель управления хостингом
 
-Корпоративный хостинг-контроллер: клиенты загружают ZIP с сайтом (`index.html`),
-указывают домен — панель сама подключает сайт к nginx, выпускает SSL-сертификат
-(Let's Encrypt через certbot или локальный CA для `*.localhost`/`*.test`) и
-включает редирект 80 → 443. Администратор управляет пользователями, квотами и видит
+Корпоративный хостинг-контроллер: клиенты загружают ZIP с сайтом (`index.html`
+или `index.php`), указывают домен — панель сама подключает сайт к nginx, выпускает
+SSL-сертификат (Let's Encrypt через certbot или локальный CA для `*.localhost`/`*.test`)
+и включает редирект 80 → 443. Администратор управляет пользователями, квотами и видит
 пути к папкам проектов (клиенту путь не показывается).
 
 ## Стек
@@ -24,6 +24,13 @@
 ```bash
 brew install go nginx certbot                       # macOS
 sudo apt install golang nginx certbot               # Debian/Ubuntu
+```
+
+Для PHP-сайтов дополнительно установите PHP-FPM:
+
+```bash
+sudo apt install php-fpm                            # Debian/Ubuntu
+# сокет обычно /run/php/php8.x-fpm.sock — панель найдёт его автоматически
 ```
 
 ```bash
@@ -122,6 +129,12 @@ root или `--nginx-reload-cmd "sudo systemctl reload nginx"`. Сертифик
 порт 80 открыт), продлеваются панелью автоматически за 30 дней до истечения. Для проверки
 без лимитов Let's Encrypt — `--ssl-staging`.
 
+**PHP** — если php-fpm установлен, панель находит стандартный сокет
+(`/run/php/php*-fpm.sock`) и добавляет в конфиги сайтов `fastcgi_pass`, `index.php`
+и обработку `.php`. Нужен свой адрес — `--php-fpm unix:/путь/к/php-fpm.sock` или
+`--php-fpm 127.0.0.1:9000`; отключить — `--php-fpm off`. После загрузки ZIP с
+`index.php` сайт начинает выполняться без дополнительных настроек.
+
 ## База данных: единый контракт для JSON / SQLite / MySQL
 
 Весь доступ к данным — через интерфейс `store.Storage` (`internal/store/store.go`).
@@ -176,6 +189,7 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | `--certbot-bin` | `CERTBOT_BIN` | `certbot` | исполняемый файл certbot |
 | `--certbot-email` | `CERTBOT_EMAIL` | `admin@example.com` | email для Let's Encrypt |
 | `--certbot-dir`, `--ssl-dir`, `--acme-dir` | `CERTBOT_DIR`, `SSL_DIR`, `ACME_DIR` | `data/…` | каталоги сертификатов и ACME |
+| `--php-fpm` | `PHP_FPM` | автоопределение | адрес php-fpm (`unix:/run/php/php-fpm.sock`, `127.0.0.1:9000`); `off` — отключить PHP |
 
 ## Метрики
 
@@ -189,7 +203,7 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 
 | Метод | Путь | Доступ | Описание |
 |---|---|---|---|
-| POST | `/api/auth/login` | — | вход, установка cookie |
+| POST | `/api/auth/login` | — | вход (`remember: true` — сессия на 30 дней), установка cookie |
 | POST | `/api/auth/register` | — | регистрация клиента |
 | POST | `/api/auth/logout` | — | выход |
 | GET | `/api/me` | user | текущий пользователь + занято |
@@ -211,10 +225,51 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | PUT | `/api/admin/users/{id}/quota` | admin | лимит хранения (2–100 ГБ) |
 | PUT | `/api/admin/registration` | admin | включить/выключить регистрацию |
 | GET | `/api/admin/stats` | admin | общая статистика (+ `registration_enabled`) |
+| GET | `/api/users/me/api-key` | user | свой API-ключ деплоя |
+| POST | `/api/users/me/api-key/regenerate` | user | перевыпустить ключ (старый перестаёт работать) |
+| POST | `/api/deploy/{id}` | API-ключ | загрузить zip с файлами проекта (полностью заменяет файлы сайта) |
+
+## Деплой из GitHub Actions
+
+У каждого пользователя есть уникальный API-ключ (Настройки → «API-ключ деплоя»).
+Workflow собирает сайт, пакует в zip и отправляет его на деплой:
+
+```yaml
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+      - name: Package
+        run: |
+          cd dist
+          zip -r ../site.zip .
+      - name: Deploy
+        run: |
+          curl -f -X POST \
+            -H "X-Api-Key: ${{ secrets.FASTHOST_API_KEY }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @site.zip \
+            https://api.sudzekai.ru/fast-host/api/deploy/1
+```
+
+`1` — id проекта (в URL проекта в панели), `FASTHOST_API_KEY` — секрет репозитория
+с API-ключом пользователя. Вместо `dist` подставьте папку сборки. В zip должен
+быть `index.html` (или `index.php`) в корне (как при загрузке через панель).
+**Деплой полностью заменяет файлы сайта:** всё, чего нет в новом архиве, удаляется;
+служебный каталог `.conf` (логи) не затрагивается.
 
 ## Ограничения
 
 - Имя проекта: `a-z0-9 _-`, 2–64 символа.
 - Домен: валидное hostname с точкой (или `localhost` для теста).
-- ZIP должен содержать `index.html` (или `index.htm`) в корне; путь-трэверсал отвергается.
+- ZIP должен содержать `index.html`, `index.htm` или `index.php` в корне; путь-трэверсал отвергается.
 - Квота: суммарно все проекты пользователя ≤ лимита (проверяется при загрузке), по умолчанию 5 ГБ, настраивается админом.

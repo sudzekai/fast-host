@@ -6,10 +6,12 @@ type Storage interface {
 	CreateUser(u *User) error
 	GetUserByID(id int64) (*User, error)
 	GetUserByUsername(name string) (*User, error)
+	GetUserByAPIKey(key string) (*User, error)
 	GetUserDetailed(id int64) (*UserDetailed, error)
 	ListUsersDetailed() ([]UserDetailed, error)
 	UpdateUserPassword(id int64, hash string) error
 	UpdateUserQuota(id int64, quota int64) error
+	UpdateUserAPIKey(id int64, key string) error
 	CountUsers() (int, error)
 
 	CreateProject(p *Project) error

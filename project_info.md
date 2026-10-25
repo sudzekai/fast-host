@@ -11,7 +11,7 @@
 Корпоративный хостинг-контроллер (аналог «панели хостинга» в стиле FastPanel):
 
 - **Клиент**: логин/пароль → панель управления → создаёт проект, указывает домен,
-  загружает ZIP с сайтом (обязателен `index.html`). При создании проекта панель
+  загружает ZIP с сайтом (обязателен `index.html`, `index.htm` или `index.php`). При создании проекта панель
   сразу подключает сайт к **nginx**; по кнопке выпускает **SSL** (certbot / локальный CA)
   и включает редирект 80 → 443. Проект можно выключить (домен перестаёт обслуживаться).
 - **Админ**: список пользователей, их проекты, лимиты хранения (квоты), смена
@@ -96,6 +96,7 @@ curl -b c.txt localhost:8080/api/projects/1/files
 | `--ssl-provider` | `SSL_PROVIDER` | `auto` | `auto` / `letsencrypt` / `selfsigned` |
 | `--ssl-staging` | `SSL_STAGING` | выкл | тестовые сертификаты Let's Encrypt |
 | `--allow-registration` | `ALLOW_REGISTRATION` | вкл | жёсткий флаг регистрации (блокирует переключатель в админке) |
+| `--php-fpm` | `PHP_FPM` | автоопределение | адрес php-fpm для `fastcgi_pass` (`unix:/run/php/php-fpm.sock`, `127.0.0.1:9000`); `off` — отключить PHP |
 | `--no-metrics` | — | выкл | отключить встроенный сборщик метрик |
 | `--metrics-interval` | — | `60` | интервал сбора метрик, сек |
 
@@ -236,12 +237,12 @@ type Metric struct {         // metrics
 ## 8. HTTP API
 
 Все ответы — JSON; ошибки — `{"error": "..."}`. Авторизация — cookie
-`fasthost_token` (HttpOnly, SameSite=Lax, TTL 12 ч) или `Authorization: Bearer`.
+`fasthost_token` (HttpOnly, SameSite=Lax, TTL 12 ч; с `remember: true` — 30 дней) или `Authorization: Bearer`.
 
 | Метод | Путь | Доступ | Назначение |
 |---|---|---|---|
 | GET | `/api/health` | — | `ok` |
-| POST | `/api/auth/login` | — | `{username,password}` → cookie + `{user}` |
+| POST | `/api/auth/login` | — | `{username,password,remember?}` → cookie + `{user}` (remember — 30 дней) |
 | POST | `/api/auth/register` | — | `{username,password}` → создаёт user-а, cookie. 403, если регистрация отключена |
 | POST | `/api/auth/logout` | любой | сброс cookie |
 | GET | `/api/me` | любой | `{user, used_bytes, project_count}` |
@@ -289,10 +290,13 @@ type Metric struct {         // metrics
   распаковка не может превысить остаток.
 - Извлечение **в staging** (`{проект}/.conf/.upload-staging`): проверка пути
   (`..`, абсолютные пути), лимит размера, затем `hasIndex` — обязателен
-  `index.html` или `index.htm` в корне.
+  `index.html`, `index.htm` или `index.php` в корне.
 - Квота — **владельца** проекта (даже если загружает админ).
 - Успех → `mergeDir` (перемещение файлов в корень проекта), пересчёт `dirSize`,
-  `updated_at` = сейчас («последнее изменение»). Ошибка → staging удаляется, файлы не трогаются.
+  `updated_at` = сейчас («последнее изменение»). Для деплоя по API-ключу
+  (`POST /api/deploy/{id}`) вместо слияния используется `replaceDir`: все файлы
+  сайта, которых нет в новом архиве, удаляются, `.conf` сохраняется; при сбое
+  старые файлы восстанавливаются из резервной папки.
 
 ### 9.3 Метрики
 
@@ -319,7 +323,17 @@ type Metric struct {         // metrics
 - Даты `ssl_issued_at`/`ssl_expires_at` читаются из сертификата (x509 NotBefore/NotAfter).
 - `RenewCertificates` раз в 12 ч перевыпускает сертификаты, до истечения которых < 30 дней.
 
-### 9.4.1 Вкл/выкл и удаление
+### 9.4.1 PHP
+
+- `PHPFPM` в `nginx.Options` задаётся флагом `--php-fpm` (env `PHP_FPM`). Пусто —
+  автоопределение `/run/php/php-fpm.sock` / `/run/php/php*-fpm.sock`; `off` — отключено.
+- При включённом PHP шаблон сайта добавляет `index index.php …`, `location ~ \.php$`
+  с `fastcgi_pass {{PHPFPM}}`, стандартные `fastcgi_param` (без внешнего `fastcgi_params`)
+  и fallback `try_files $uri $uri/ /index.html /index.php?$query_string` — работают
+  и SPA, и PHP-роутеры.
+- Загрузка ZIP принимает `index.php` как точку входа наравне с `index.html`.
+
+### 9.4.2 Вкл/выкл и удаление
 
 - `PUT .../enabled {enabled}`: выключение удаляет `{sites}/{домен}.conf` и перезагружает
   nginx; запросы к домену ловит `00-default.conf` (`return 444` / `ssl_reject_handshake`).
@@ -462,7 +476,7 @@ DOM-смоук: при разработке использовался node-ха
     ссылаться на элементы среза значений — append/удаление их инвалидируют.
 11. **Ограничения валидации**: имя проекта 2–64 символа (a-z0-9_-), логин 3–32
     (латиница/цифры/_ ), пароль ≥6, домен — hostname с точкой или `localhost`,
-    квота 100 МБ–100 ГБ.
+    квота 100 МБ–100 ГБ. ZIP обязан содержать `index.html`, `index.htm` или `index.php`.
 
 ---
 

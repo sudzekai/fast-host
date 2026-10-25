@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -54,11 +55,18 @@ func main() {
 	}
 	defer st.Close()
 	seedAdmin(st, cfg)
+	backfillAPIKeys(st)
 	if cfg.JWTSecret == "" {
 		cfg.JWTSecret = persistentSecret(st)
 	}
 
-	ngx := nginx.NewManager(nginxOptions(cfg))
+	nginxOpt := nginxOptions(cfg)
+	if nginxOpt.PHPFPM == "" {
+		log.Printf("php: php-fpm не найден или отключён — PHP-страницы выполняться не будут (флаг --php-fpm)")
+	} else {
+		log.Printf("php: fastcgi_pass %s", nginxOpt.PHPFPM)
+	}
+	ngx := nginx.NewManager(nginxOpt)
 	if err := ngx.Init(); err != nil {
 		log.Fatalf("nginx: %v", err)
 	}
@@ -123,6 +131,22 @@ func seedAdmin(st store.Storage, cfg *config.Config) {
 	log.Printf("Создан администратор: %s (смените пароль в панели)", cfg.AdminUsername)
 }
 
+// backfillAPIKeys выдаёт ключ пользователям, созданным до появления ключей.
+func backfillAPIKeys(st store.Storage) {
+	users, err := st.ListUsersDetailed()
+	if err != nil {
+		log.Printf("ключи API: список пользователей: %v", err)
+		return
+	}
+	for i := range users {
+		if users[i].APIKey == "" {
+			if err := st.UpdateUserAPIKey(users[i].ID, store.NewAPIKey()); err != nil {
+				log.Printf("ключи API: %s: %v", users[i].Username, err)
+			}
+		}
+	}
+}
+
 // persistentSecret генерирует секрет JWT при первом запуске и хранит его в БД,
 // чтобы сессии переживали перезапуск, а секрет не был общеизвестным значением.
 func persistentSecret(st store.Storage) string {
@@ -170,5 +194,32 @@ func nginxOptions(cfg *config.Config) nginx.Options {
 		CertbotEmail:  cfg.CertbotEmail,
 		CertbotStage:  cfg.SSLStaging,
 		SSLProvider:   cfg.SSLProvider,
+		PHPFPM:        resolvePHPFPM(cfg.PHPFPM),
 	}
+}
+
+// resolvePHPFPM выбирает адрес php-fpm. Пустое значение — автоопределение
+// стандартных сокетов, "off"/"none" — PHP отключён.
+func resolvePHPFPM(v string) string {
+	v = strings.TrimSpace(v)
+	switch strings.ToLower(v) {
+	case "off", "none", "disabled", "-":
+		return ""
+	case "":
+	default:
+		return v
+	}
+	for _, p := range []string{"/run/php/php-fpm.sock", "/var/run/php/php-fpm.sock"} {
+		if _, err := os.Stat(p); err == nil {
+			return "unix:" + p
+		}
+	}
+	for _, pattern := range []string{"/run/php/php*-fpm.sock", "/var/run/php/php*-fpm.sock"} {
+		matches, _ := filepath.Glob(pattern)
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			return "unix:" + matches[len(matches)-1]
+		}
+	}
+	return ""
 }

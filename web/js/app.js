@@ -89,6 +89,10 @@ function renderLogin(app) {
       h('label', { html: 'Пароль' }),
       h('input', { class: 'input', id: 'login-pass', type: 'password', autocomplete: 'current-password' }),
     ]),
+    h('label', { class: 'checkbox-row' }, [
+      h('input', { type: 'checkbox', id: 'login-remember' }),
+      h('span', { html: 'Запомнить меня на 30 дней' }),
+    ]),
     h('button', { class: 'btn btn-primary btn-block', id: 'login-btn' }, 'Войти'),
     h('div', { class: 'auth-switch' }, ['Нет аккаунта? ', h('a', { href: '#/register', html: 'Регистрация' })]),
   ]);
@@ -101,6 +105,7 @@ function renderLogin(app) {
       await api.post('/api/auth/login', {
         username: document.getElementById('login-user').value.trim(),
         password: document.getElementById('login-pass').value,
+        remember: document.getElementById('login-remember').checked,
       });
       await refreshMe();
       location.hash = '#/';
@@ -461,6 +466,8 @@ async function renderProjectDetail(page, id) {
 
   const refreshDetail = () => renderProjectDetail(page, id);
 
+  const uploadUI = createUploadUI();
+
   const actions = h('div', { class: 'page-actions' }, [
     h('button', { class: 'btn', onclick: refreshDetail }, ICONS.refresh + ' Обновить'),
     h('button', { class: 'btn', disabled: !p.enabled, title: p.enabled ? '' : 'Проект выключен', onclick: () => window.open(p.site_url, '_blank') }, ICONS.external + ' Открыть сайт'),
@@ -469,7 +476,11 @@ async function renderProjectDetail(page, id) {
       ICONS.upload, 'Загрузить ZIP',
       h('input', {
         type: 'file', accept: '.zip', style: 'display:none',
-        onchange: (e) => uploadZip(p, e.target.files[0]),
+        onchange: (e) => {
+          const file = e.target.files[0];
+          e.target.value = '';
+          uploadZip(p, file, uploadUI);
+        },
       }),
     ]),
   ]);
@@ -481,6 +492,8 @@ async function renderProjectDetail(page, id) {
     ]),
     actions,
   ]));
+
+  page.append(uploadUI.panel);
 
   const toggle = h('label', { class: 'switch', title: p.enabled ? 'Выключить сайт' : 'Включить сайт' }, [
     h('input', {
@@ -573,15 +586,65 @@ function infoItem(label, value) {
   ]);
 }
 
-async function uploadZip(p, file) {
+function createUploadUI() {
+  let fileName = '';
+  let busy = false;
+  const label = h('div', { class: 'upload-label' }, '');
+  const percent = h('div', { class: 'upload-pct' }, '');
+  const bar = h('div', { class: 'progress-bar', style: 'width:0%' });
+  const panel = h('div', { class: 'card upload-card mb-24', style: 'display:none' }, [
+    h('div', { class: 'card-pad' }, [
+      h('div', { class: 'flex-between' }, [label, percent]),
+      h('div', { class: 'progress mt-8' }, [bar]),
+      h('div', { class: 'upload-hint muted' }, 'Не закрывайте вкладку, пока загрузка и распаковка не завершатся.'),
+    ]),
+  ]);
+
+  const show = (text, pct, cls) => {
+    panel.style.display = '';
+    label.textContent = text;
+    percent.textContent = pct + '%';
+    bar.style.width = pct + '%';
+    bar.className = 'progress-bar' + (cls ? ' ' + cls : '');
+  };
+
+  return {
+    panel,
+    get busy() { return busy; },
+    start(file) {
+      busy = true;
+      fileName = file.name || 'архив';
+      show('Загрузка ' + fileName + '…', 0);
+    },
+    progress(frac) {
+      const pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+      if (pct >= 100) show('Файл передан. Сервер распаковывает архив…', 100);
+      else show('Загрузка ' + fileName + '…', pct);
+    },
+    fail(message) {
+      busy = false;
+      show('Ошибка загрузки: ' + message, 0, 'danger');
+    },
+  };
+}
+
+async function uploadZip(p, file, ui) {
   if (!file) return;
+  if (ui && ui.busy) {
+    toast('Дождитесь завершения текущей загрузки', 'warn');
+    return;
+  }
+  if (ui) ui.start(file);
   const fd = new FormData();
   fd.append('file', file);
   try {
-    const res = await api.upload('/api/projects/' + p.id + '/upload', fd);
+    const res = await api.upload('/api/projects/' + p.id + '/upload', fd, (frac) => {
+      if (ui) ui.progress(frac);
+    });
     toast('Архив загружен: ' + formatBytes(res.written) + ', файлы распакованы');
     render();
   } catch (e) {
+    if (ui) ui.fail(e.message);
     toast(e.message, 'err');
   }
 }
@@ -604,7 +667,7 @@ async function applySSL(p, btn) {
     render();
   } catch (e) {
     openModal('Не удалось выпустить сертификат', h('div', { class: 'code-block' }, e.message),
-      [h('button', { class: 'btn btn-primary', onclick: closeModal }, 'Закрыть')]);
+      [h('button', { class: 'btn btn-primary', onclick: closeModal }, 'Закрыть')], { size: 'wide' });
     if (btn) btn.disabled = false;
   }
 }
@@ -648,7 +711,7 @@ async function loadFiles(p) {
     const data = await api.get('/api/projects/' + p.id + '/files');
     body.innerHTML = '';
     if (!data.files || data.files.length === 0) {
-      body.append(h('div', { class: 'empty-state', html: 'Файлы не загружены. Загрузите ZIP-архив с index.html.' }));
+      body.append(h('div', { class: 'empty-state', html: 'Файлы не загружены. Загрузите ZIP-архив с index.html или index.php.' }));
       return;
     }
     const list = h('ul', { class: 'file-list' });
@@ -668,17 +731,53 @@ async function loadFiles(p) {
 
 /* ================= НАСТРОЙКИ ================= */
 
-function renderSettings(page) {
+function showAPIKey(key) {
+  const el = document.getElementById('api-key-view');
+  el.dataset.key = key;
+  el.innerHTML = escapeHtml(key);
+}
+
+async function renderSettings(page) {
   page.innerHTML = '';
   page.append(breadcrumbs([{ href: '#/', label: 'Панель' }, { label: 'Настройки' }]));
   page.append(h('div', { class: 'page-head' }, [
     h('div', {}, [
       h('div', { class: 'page-title', html: 'Настройки' }),
-      h('div', { class: 'page-sub', html: 'Смена пароля учётной записи' }),
+      h('div', { class: 'page-sub', html: 'Ключ API для деплоя, смена пароля' }),
     ]),
   ]));
 
-  page.append(h('div', { class: 'card', style: 'max-width:480px' }, [
+  const keyCard = h('div', { class: 'card', style: 'max-width:480px' }, [
+    h('div', { class: 'card-head' }, [h('div', { class: 'card-title', html: 'API-ключ деплоя' })]),
+    h('div', { class: 'card-pad' }, [
+      h('div', { class: 'field' }, [
+        h('label', { html: 'Ключ' }),
+        h('div', { class: 'mono word-break', id: 'api-key-view', html: '…' }),
+      ]),
+      h('div', { class: 'flex gap-16' }, [
+        h('button', { class: 'btn', onclick: async () => {
+          const key = document.getElementById('api-key-view').dataset.key;
+          if (!key) return;
+          try {
+            await navigator.clipboard.writeText(key);
+            toast('Ключ скопирован');
+          } catch (e) { toast('Не удалось скопировать', 'err'); }
+        } }, ICONS.copy + ' Копировать'),
+        h('button', { class: 'btn btn-danger', onclick: async () => {
+          const ok = await confirmDialog('Перевыпустить ключ', 'Старый ключ перестанет работать — обновите его в секретах GitHub.', true);
+          if (!ok) return;
+          try {
+            const res = await api.post('/api/users/me/api-key/regenerate');
+            showAPIKey(res.api_key);
+            toast('Ключ перевыпущен');
+          } catch (e) { toast(e.message, 'err'); }
+        } }, 'Перевыпустить'),
+      ]),
+    ]),
+  ]);
+  page.append(keyCard);
+
+  page.append(h('div', { class: 'card mt-16', style: 'max-width:480px' }, [
     h('div', { class: 'card-head' }, [h('div', { class: 'card-title', html: 'Пароль' })]),
     h('div', { class: 'card-pad' }, [
       h('div', { class: 'field' }, [
@@ -704,6 +803,13 @@ function renderSettings(page) {
       } }, 'Сменить пароль'),
     ]),
   ]));
+
+  try {
+    const res = await api.get('/api/users/me/api-key');
+    showAPIKey(res.api_key);
+  } catch (e) {
+    document.getElementById('api-key-view').innerHTML = 'недоступен: ' + escapeHtml(e.message);
+  }
 }
 
 /* ================= АДМИН: ПОЛЬЗОВАТЕЛИ ================= */

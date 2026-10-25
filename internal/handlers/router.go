@@ -26,6 +26,10 @@ func NewRouter(h *Handlers, secret string) http.Handler {
 
 	mux.Handle("GET /api/me", authMW(http.HandlerFunc(h.me)))
 	mux.Handle("PUT /api/users/me/password", authMW(http.HandlerFunc(h.changeOwnPassword)))
+	mux.Handle("GET /api/users/me/api-key", authMW(http.HandlerFunc(h.myAPIKey)))
+	mux.Handle("POST /api/users/me/api-key/regenerate", authMW(http.HandlerFunc(h.regenerateAPIKey)))
+
+	mux.Handle("POST /api/deploy/{id}", apiKeyMW(h.store)(http.HandlerFunc(h.deploy)))
 
 	mux.Handle("GET /api/projects", authMW(http.HandlerFunc(h.listProjects)))
 	mux.Handle("POST /api/projects", authMW(http.HandlerFunc(h.createProject)))

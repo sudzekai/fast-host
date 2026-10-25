@@ -28,5 +28,33 @@ const api = {
   post(p, b) { return this.request('POST', p, b); },
   put(p, b) { return this.request('PUT', p, b); },
   del(p) { return this.request('DELETE', p); },
-  upload(p, formData) { return this.request('POST', p, formData); },
+  upload(p, formData, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', this.url(p));
+      xhr.withCredentials = true;
+      if (onProgress && xhr.upload) {
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable && e.total > 0) onProgress(e.loaded / e.total);
+        };
+        xhr.upload.onload = () => onProgress(1);
+      }
+      xhr.onload = () => {
+        let data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+        if (xhr.status === 401) {
+          reject(new Error((data && data.error) || 'требуется авторизация'));
+          return;
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new Error((data && data.error) || ('HTTP ' + xhr.status)));
+          return;
+        }
+        resolve(data);
+      };
+      xhr.onerror = () => reject(new Error('сетевая ошибка при загрузке архива'));
+      xhr.onabort = () => reject(new Error('загрузка отменена'));
+      xhr.send(formData);
+    });
+  },
 };

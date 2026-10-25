@@ -49,6 +49,10 @@ type Options struct {
 	// и неизвестным доменам не попадали на чужой сайт.
 	DefaultServer bool
 
+	// PHPFPM — адрес php-fpm для fastcgi_pass (например "unix:/run/php/php-fpm.sock"
+	// или "127.0.0.1:9000"). Пусто — PHP не подключается.
+	PHPFPM string
+
 	AcmeDir      string // webroot для HTTP-01 проверки Let's Encrypt
 	SSLDir       string // самоподписанные сертификаты и локальный CA
 	CertbotBin   string
@@ -132,7 +136,11 @@ server {
 {{- end}}
 
     root {{.Root}};
+{{- if .PHP}}
+    index index.php index.html index.htm;
+{{- else}}
     index index.html index.htm;
+{{- end}}
 
     access_log {{.LogDir}}/access.log;
     error_log {{.LogDir}}/error.log;
@@ -140,9 +148,44 @@ server {
     location ~ /\.(?!well-known/) {
         return 404;
     }
+{{- if .PHP}}
+
+    location ~ \.php$ {
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass {{.PHPFPM}};
+        fastcgi_index index.php;
+
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_param QUERY_STRING $query_string;
+        fastcgi_param REQUEST_METHOD $request_method;
+        fastcgi_param CONTENT_TYPE $content_type;
+        fastcgi_param CONTENT_LENGTH $content_length;
+        fastcgi_param SCRIPT_NAME $fastcgi_script_name;
+        fastcgi_param REQUEST_URI $request_uri;
+        fastcgi_param DOCUMENT_URI $document_uri;
+        fastcgi_param DOCUMENT_ROOT $document_root;
+        fastcgi_param SERVER_PROTOCOL $server_protocol;
+        fastcgi_param REQUEST_SCHEME $scheme;
+        fastcgi_param HTTPS $https if_not_empty;
+        fastcgi_param GATEWAY_INTERFACE CGI/1.1;
+        fastcgi_param SERVER_SOFTWARE nginx/$nginx_version;
+        fastcgi_param REMOTE_ADDR $remote_addr;
+        fastcgi_param REMOTE_PORT $remote_port;
+        fastcgi_param SERVER_ADDR $server_addr;
+        fastcgi_param SERVER_PORT $server_port;
+        fastcgi_param SERVER_NAME $server_name;
+        fastcgi_param REDIRECT_STATUS 200;
+    }
+{{- end}}
 
     location / {
+{{- if .PHP}}
+        try_files $uri $uri/ /index.html /index.php?$query_string;
+{{- else}}
         try_files $uri $uri/ /index.html;
+{{- end}}
     }
 
     location ~* \.(css|js|png|jpg|jpeg|gif|svg|ico|webp|avif|woff2?|ttf)$ {
@@ -235,6 +278,8 @@ func (m *Manager) Render(s Site) string {
 		"SSL":         s.SSL,
 		"CertFile":    filepath.ToSlash(s.CertFile),
 		"KeyFile":     filepath.ToSlash(s.KeyFile),
+		"PHP":         m.opt.PHPFPM != "",
+		"PHPFPM":      m.opt.PHPFPM,
 	})
 	return b.String()
 }

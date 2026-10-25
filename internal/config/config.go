@@ -36,6 +36,8 @@ type Config struct {
 	CertbotDir   string
 	CertbotEmail string
 	SSLStaging   bool
+
+	PHPFPM string
 }
 
 func FromFlags() (*Config, error) {
@@ -79,6 +81,7 @@ func FromFlags() (*Config, error) {
 	certbotDir := flag.String("certbot-dir", envOr("CERTBOT_DIR", ""), "certbot --config-dir (default {data}/data/letsencrypt)")
 	certbotEmail := flag.String("certbot-email", envOr("CERTBOT_EMAIL", "admin@example.com"), "email for Let's Encrypt")
 	sslStaging := flag.Bool("ssl-staging", envOr("SSL_STAGING", "0") == "1", "use Let's Encrypt staging (test certificates)")
+	phpFPM := flag.String("php-fpm", envOr("PHP_FPM", ""), "php-fpm address for fastcgi_pass, e.g. unix:/run/php/php-fpm.sock or 127.0.0.1:9000 (empty: auto-detect, off: disable)")
 	flag.Parse()
 
 	cfg.Port = *port
@@ -113,6 +116,7 @@ func FromFlags() (*Config, error) {
 	cfg.CertbotDir = *certbotDir
 	cfg.CertbotEmail = *certbotEmail
 	cfg.SSLStaging = *sslStaging
+	cfg.PHPFPM = *phpFPM
 
 	switch cfg.SSLProvider {
 	case "auto", "letsencrypt", "selfsigned":

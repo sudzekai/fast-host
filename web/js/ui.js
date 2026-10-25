@@ -48,10 +48,10 @@ function toast(message, type = 'ok', timeout = 4000) {
   setTimeout(() => t.remove(), timeout + 350);
 }
 
-function openModal(title, bodyEl, footEl) {
+function openModal(title, bodyEl, footEl, opts = {}) {
   const root = document.getElementById('modal-root');
   root.innerHTML = '';
-  const modal = h('div', { class: 'modal' });
+  const modal = h('div', { class: 'modal' + (opts.size ? ' modal-' + opts.size : '') });
   const head = h('div', { class: 'modal-head' }, [
     h('div', { class: 'modal-title', html: title }),
     h('button', { class: 'modal-close', html: '&times;', onclick: closeModal }),

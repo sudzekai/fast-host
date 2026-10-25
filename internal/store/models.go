@@ -1,7 +1,9 @@
 package store
 
 import (
+	"crypto/rand"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -36,6 +38,18 @@ type User struct {
 	Role         string `json:"role"`
 	QuotaBytes   int64  `json:"quota_bytes"`
 	CreatedAt    string `json:"created_at"`
+	APIKey       string `json:"api_key"`
+}
+
+// NewAPIKey генерирует уникальный ключ пользователя (UUID v4).
+func NewAPIKey() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 type UserDetailed struct {

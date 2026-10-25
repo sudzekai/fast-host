@@ -66,7 +66,7 @@ func extractZip(r io.ReaderAt, size int64, dest string, maxBytes int64) (written
 }
 
 func hasIndex(projectDir string) bool {
-	for _, name := range []string{"index.html", "index.htm"} {
+	for _, name := range []string{"index.php", "index.html", "index.htm"} {
 		if fi, err := os.Stat(filepath.Join(projectDir, name)); err == nil && !fi.IsDir() {
 			return true
 		}
@@ -111,4 +111,50 @@ func mergeDir(src, dst string) error {
 	})
 }
 
-var errNoIndex = errors.New("в архиве нет index.html (или index.htm) в корне проекта")
+// replaceDir заменяет файлы сайта содержимым staging: всё, кроме служебного
+// каталога keep (".conf"), сначала переносится в резервную папку. Если перенос
+// новых файлов сорвался, старые файлы возвращаются на место.
+func replaceDir(src, dst, keep string) error {
+	backup, err := os.MkdirTemp(filepath.Join(dst, keep), ".previous-deploy-*")
+	if err != nil {
+		return err
+	}
+	var moved []string
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		os.RemoveAll(backup)
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == keep {
+			continue
+		}
+		if err := os.Rename(filepath.Join(dst, name), filepath.Join(backup, name)); err != nil {
+			for _, m := range moved {
+				_ = os.Rename(filepath.Join(backup, m), filepath.Join(dst, m))
+			}
+			os.RemoveAll(backup)
+			return err
+		}
+		moved = append(moved, name)
+	}
+	if err := mergeDir(src, dst); err != nil {
+		if rest, readErr := os.ReadDir(dst); readErr == nil {
+			for _, e := range rest {
+				if e.Name() != keep {
+					_ = os.RemoveAll(filepath.Join(dst, e.Name()))
+				}
+			}
+		}
+		for _, m := range moved {
+			_ = os.Rename(filepath.Join(backup, m), filepath.Join(dst, m))
+		}
+		os.RemoveAll(backup)
+		return err
+	}
+	os.RemoveAll(backup)
+	return nil
+}
+
+var errNoIndex = errors.New("в архиве нет index.html, index.htm или index.php в корне проекта")

@@ -135,12 +135,6 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	// Квота — владельца проекта, даже если загружает администратор.
-	owner, err := h.store.GetUserByID(p.UserID)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "владелец проекта не найден")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<30)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "ошибка чтения формы: "+err.Error())
@@ -152,11 +146,31 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	written, ok := h.receiveZip(w, p, file, false)
+	if !ok {
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"project":    h.publicProject(r, p),
+		"written":    written,
+		"disk_bytes": p.DiskBytes,
+	})
+}
 
+// receiveZip распаковывает zip из file в каталог проекта: общая логика для
+// загрузки через панель и через деплой по API-ключу. replace=true полностью
+// заменяет файлы сайта (деплой), false — дополняет существующие (ручная загрузка).
+func (h *Handlers) receiveZip(w http.ResponseWriter, p *store.Project, file io.Reader, replace bool) (int64, bool) {
+	// Квота — владельца проекта, даже если загружает администратор.
+	owner, err := h.store.GetUserByID(p.UserID)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "владелец проекта не найден")
+		return 0, false
+	}
 	projects, err := h.store.ListProjectsByUser(owner.ID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка базы данных")
-		return
+		return 0, false
 	}
 	var used int64
 	for _, pr := range projects {
@@ -165,29 +179,29 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	quotaLeft := owner.QuotaBytes - used
 	if quotaLeft <= 0 {
 		httpx.Error(w, http.StatusRequestEntityTooLarge, "квота хранения исчерпана")
-		return
+		return 0, false
 	}
 
 	tmp, err := os.CreateTemp(filepath.Join(p.Path, ".conf"), "upload-*.zip")
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка временного файла")
-		return
+		return 0, false
 	}
 	defer os.Remove(tmp.Name()) // на случай раннего выхода; ниже удаляется явно до подсчёта размера
 	if _, err := io.Copy(tmp, file); err != nil {
 		tmp.Close()
 		httpx.Error(w, http.StatusBadRequest, "ошибка чтения архива")
-		return
+		return 0, false
 	}
 	tmp.Close()
 	stat, err := os.Stat(tmp.Name())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка чтения архива")
-		return
+		return 0, false
 	}
 	if stat.Size() == 0 {
 		httpx.Error(w, http.StatusBadRequest, "архив пуст")
-		return
+		return 0, false
 	}
 
 	staging := filepath.Join(p.Path, ".conf", ".upload-staging")
@@ -195,7 +209,7 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	zf, err := os.Open(tmp.Name())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка чтения архива")
-		return
+		return 0, false
 	}
 	written, err := extractZip(zf, stat.Size(), staging, quotaLeft)
 	zf.Close()
@@ -203,20 +217,25 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 		os.RemoveAll(staging)
 		if errors.Is(err, store.ErrQuotaExceeded) {
 			httpx.Error(w, http.StatusRequestEntityTooLarge, "архив превышает оставшуюся квоту ("+formatBytes(quotaLeft)+")")
-			return
+			return 0, false
 		}
 		httpx.Error(w, http.StatusBadRequest, err.Error())
-		return
+		return 0, false
 	}
 	if !hasIndex(staging) {
 		os.RemoveAll(staging)
 		httpx.Error(w, http.StatusBadRequest, errNoIndex.Error())
-		return
+		return 0, false
 	}
-	if err := mergeDir(staging, p.Path); err != nil {
+	if replace {
+		err = replaceDir(staging, p.Path, ".conf")
+	} else {
+		err = mergeDir(staging, p.Path)
+	}
+	if err != nil {
 		os.RemoveAll(staging)
 		httpx.Error(w, http.StatusInternalServerError, "ошибка переноса файлов")
-		return
+		return 0, false
 	}
 	os.RemoveAll(staging)
 	os.Remove(tmp.Name())
@@ -224,13 +243,9 @@ func (h *Handlers) uploadProjectZip(w http.ResponseWriter, r *http.Request) {
 	p.UpdatedAt = store.Now()
 	if err := h.store.UpdateProject(p); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "ошибка базы данных")
-		return
+		return 0, false
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"project":    h.publicProject(r, p),
-		"written":    written,
-		"disk_bytes": p.DiskBytes,
-	})
+	return written, true
 }
 
 func (h *Handlers) downloadProjectZip(w http.ResponseWriter, r *http.Request) {
