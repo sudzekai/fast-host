@@ -34,10 +34,10 @@ sudo apt install php-fpm                            # Debian/Ubuntu
 ```
 
 ```bash
-./run.sh --local         # панель сама запускает nginx со своим конфигом, порт панели 8080
+./api/run.sh --local         # панель сама запускает nginx со своим конфигом, порт панели 8080
 # или
-./run.sh --port 9090
-./run.sh --db sqlite     # SQLite (сборка с -tags db_sql)
+./api/run.sh --port 9090
+./api/run.sh --db sqlite     # SQLite (сборка с -tags db_sql)
 ```
 
 Открыть API: **http://localhost:8080/api/health**
@@ -47,7 +47,7 @@ sudo apt install php-fpm                            # Debian/Ubuntu
 передавал cookie между доменами, разрешите origin вебки на API:
 
 ```bash
-./run.sh --cors-origins "https://panel.sudzekai.ru,http://localhost:8081"
+./api/run.sh --cors-origins "https://panel.sudzekai.ru,http://localhost:8081"
 ```
 
 Первый вход: логин **admin**, пароль **admin** (сменить в «Настройки»).
@@ -59,20 +59,44 @@ sudo apt install php-fpm                            # Debian/Ubuntu
 ## Структура файлов
 
 ```
-hosting/
-├── main.go               # точка входа (только API, статику не отдаёт)
-├── run.sh                # сборка и запуск сервера
-├── metricsd.sh           # отдельный сервис метрик (альтернатива встроенному)
-├── internal/
-│   ├── config/           # флаги и переменные окружения
-│   ├── store/            # контракт Storage + драйверы: json / sqlite / mysql
-│   ├── auth/             # JWT, bcrypt, middleware
-│   ├── nginx/            # генерация nginx-конфига и certbot-скриптов
-│   ├── metrics/          # сборщик метрик (диск, access.log)
-│   └── handlers/         # REST API + статика
-├── cmd/metricsd/         # отдельный сервис метрик
-└── web/                  # отдельный фронтенд-проект (хостится через nginx, не через API)
+fast-host/
+├── api/                  # самостоятельный Go-модуль сервера
+│   ├── go.mod, go.sum     # зависимости API
+│   ├── main.go            # точка входа API
+│   ├── run.sh             # сборка и запуск API из корня проекта
+│   ├── metricsd.sh        # сборка и запуск отдельного сборщика метрик
+│   ├── cmd/metricsd/      # точка входа сборщика метрик
+│   └── internal/
+│       ├── config/        # флаги и переменные окружения
+│       ├── store/         # Storage: JSON / SQLite / MySQL
+│       ├── auth/          # JWT, bcrypt, middleware
+│       ├── nginx/         # управление nginx и SSL
+│       ├── metrics/       # сбор метрик
+│       ├── httpx/         # HTTP/JSON-хелперы
+│       └── handlers/      # REST API
+├── web/                  # самостоятельный статический фронтенд
+│   ├── index.html
+│   ├── css/
+│   └── js/
+├── data/                 # служебные данные API (не в Git)
+├── users/                # сайты пользователей (не в Git)
+└── bin/                  # собранные исполняемые файлы (не в Git)
 ```
+
+Go-команды выполняются в `api/` или из корня с `go -C api ...`:
+
+```bash
+go -C api test ./...
+go -C api test -tags db_sql ./...
+go -C api vet ./...
+go -C api vet -tags db_sql ./...
+```
+
+Скрипты `api/run.sh` и `api/metricsd.sh` можно вызывать из любого каталога:
+они используют корень репозитория как рабочий каталог. Поэтому существующие
+`data/`, `users/` и относительные пути конфигурации сохраняются. При ручном
+запуске бинарного файла используйте корень проекта как рабочий каталог.
+Фронтенд развёртывается отдельно: document root nginx указывает на `web/`.
 
 ### Проекты клиентов и служебные данные
 
@@ -103,7 +127,7 @@ data/
 (при ошибке откатывает файл, чтобы не сломать остальные сайты) и перезагружает nginx.
 В конфигах только рабочие директивы, без комментариев.
 
-**Локально (macOS / разработка)** — `./run.sh --local`: панель генерирует
+**Локально (macOS / разработка)** — `./api/run.sh --local`: панель генерирует
 `data/nginx/nginx.conf` и запускает свой экземпляр nginx на 80/443 (на macOS root не
 нужен). Для доменов `*.localhost`, `*.test`, `*.local` и т.п. Let's Encrypt невозможен,
 поэтому сертификат подписывается локальным CA панели (`data/ssl/ca.pem`). Проверка:
@@ -129,16 +153,67 @@ root или `--nginx-reload-cmd "sudo systemctl reload nginx"`. Сертифик
 порт 80 открыт), продлеваются панелью автоматически за 30 дней до истечения. Для проверки
 без лимитов Let's Encrypt — `--ssl-staging`.
 
-**PHP** — если php-fpm установлен, панель находит стандартный сокет
+**PHP в старых проектах** — если php-fpm установлен, панель находит стандартный сокет
 (`/run/php/php*-fpm.sock`) и добавляет в конфиги сайтов `fastcgi_pass`, `index.php`
 и обработку `.php`. Нужен свой адрес — `--php-fpm unix:/путь/к/php-fpm.sock` или
 `--php-fpm 127.0.0.1:9000`; отключить — `--php-fpm off`. После загрузки ZIP с
-`index.php` сайт начинает выполняться без дополнительных настроек.
+`index.php` сайт начинает выполняться без дополнительных настроек. Для новых
+проектов выберите тип `PHP-FPM`: он использует отдельный пул, описанный ниже.
+
+## PHP-проекты и каталоги данных
+
+При создании проекта выберите `nginx` (статика) или `PHP-FPM` (PHP).
+В карточке существующего проекта тип можно изменить. У PHP-проектов собственные
+системный пользователь и пул; nginx обслуживает HTTP/HTTPS, SSL и access.log,
+поэтому загрузка ZIP, деплой, метрики и переключатель сайта работают одинаково.
+Старые проекты без поля `provider` сохраняют прежнюю общую настройку `--php-fpm`.
+
+Управляемые пулы рассчитаны на Linux с systemd и расположением PHP как в Debian.
+Установите PHP CLI, FPM и SQLite-модуль одной версии (не ниже 8.2):
+
+```bash
+sudo apt install php8.4-cli php8.4-fpm php8.4-sqlite3
+sudo systemctl enable --now php8.4-fpm
+sudo ./api/run.sh --php-version 8.4
+```
+
+API нужны права root для создания пользователей, назначения владельца каталогов
+и управления пулами. PHP выполняется от отдельного пользователя проекта.
+Сокеты пулов доступны nginx-пользователю `www-data`. Версия по умолчанию — 8.4;
+её можно изменить через `--php-version` / `PHP_VERSION`.
+Перед созданием пула проверяются PHP 8.2+, `pdo_sqlite` и работоспособность Argon2id.
+
+В карточке PHP-проекта откройте **Каталоги данных → Создать каталог**.
+Задайте имя папки и переменной окружения, например `database` и `APP_DATA_DIR`.
+Панель создаст `data/project-data/{ключ проекта}/volumes/database` вне корня сайта,
+назначит пользователя пула владельцем и установит права `0700`.
+Абсолютный путь передаётся через `env[APP_DATA_DIR]` в конфигурации пула.
+Произвольные серверные пути из браузера не принимаются.
+
+В каталоге можно создавать, загружать и редактировать текстовые конфигурационные
+файлы размером до 1 МБ (права `0600`, владелец — пользователь пула).
+Базы SQLite изменяет приложение, а не редактор конфигурации.
+Для `brosayukurit.online` создайте переменную `BROSAYU_DATA_DIR`, затем файл
+`config.json` с содержимым `{"origin":"https://brosayukurit.online"}`.
+Это настройки приложения, они не зашиты в код панели.
+
+Данные учитываются в размере проекта и дисковой квоте, сохраняются при ZIP-деплое
+и выключении сайта, удаляются при удалении проекта. Скачивание ZIP содержит
+только файлы сайта. При выключении проекта пул убирается; при включении создаётся
+повторно с прежними каталогами и переменными.
+
+Отдельный проверочный сценарий запускает временные API/nginx на портах
+18081/18080/18443 и проверяет реальный PHP-FPM, SQLite, Argon2id, права,
+переменные, SSL, метрики и сохранность базы при деплое:
+
+```bash
+sudo python3 api/tests/phpfpm_integration.py /absolute/path/to/fasthost 8.4
+```
 
 ## База данных: единый контракт для JSON / SQLite / MySQL
 
-Весь доступ к данным — через интерфейс `store.Storage` (`internal/store/store.go`).
-Драйверы (`internal/store/`):
+Весь доступ к данным — через интерфейс `store.Storage` (`api/internal/store/store.go`).
+Драйверы (`api/internal/store/`):
 
 | Драйвер | Файл | Когда |
 |---|---|---|
@@ -147,20 +222,20 @@ root или `--nginx-reload-cmd "sudo systemctl reload nginx"`. Сертифик
 | `mysql` | `sql.go` | `go build -tags db_sql` |
 
 SQL-драйверы компилируются только с тегом `db_sql` (иначе не тянется
-`modernc.org/sqlite`). `run.sh` автоматически добавляет тег, если запрошен
+`modernc.org/sqlite`). `api/run.sh` автоматически добавляет тег, если запрошен
 `--db sqlite|mysql`.
 
 ```bash
 # JSON (по умолчанию)
-./run.sh
+./api/run.sh
 
 # SQLite
-./run.sh --db sqlite
+./api/run.sh --db sqlite
 # или вручную:
-go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
+go -C api build -tags db_sql -o ../bin/fasthost . && ./bin/fasthost --db sqlite
 
 # MySQL (создайте базу заранее: CREATE DATABASE fasthost CHARACTER SET utf8mb4)
-./run.sh --db mysql --dsn "user:password@tcp(127.0.0.1:3306)/fasthost?parseTime=true&charset=utf8mb4"
+./api/run.sh --db mysql --dsn "user:password@tcp(127.0.0.1:3306)/fasthost?parseTime=true&charset=utf8mb4"
 ```
 
 ## Параметры запуска
@@ -179,7 +254,7 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | `--metrics-interval` | — | `60` | интервал сбора метрик, сек |
 | `--cors-origins` | `CORS_ORIGINS` | пусто | разрешённые origin вебки через запятую (иначе только same-origin) |
 | `--nginx-bin` | `NGINX_BIN` | `nginx` | исполняемый файл nginx |
-| `--nginx-conf` | `NGINX_CONF` | — | свой главный конфиг: панель создаёт его и сама запускает nginx (`run.sh --local`) |
+| `--nginx-conf` | `NGINX_CONF` | — | свой главный конфиг: панель создаёт его и сама запускает nginx (`api/run.sh --local`) |
 | `--nginx-sites` | `NGINX_SITES_DIR` | `data/nginx/sites` | каталог конфигов сайтов (его подключает `include`) |
 | `--nginx-reload-cmd` | `NGINX_RELOAD_CMD` | `nginx -s reload` | своя команда перезагрузки |
 | `--nginx-http-port` / `--nginx-https-port` | `NGINX_HTTP_PORT` / `NGINX_HTTPS_PORT` | `80` / `443` | порты сайтов |
@@ -193,10 +268,24 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 
 ## Метрики
 
+В карточке проекта показаны состояние сборщика, время последнего замера и ошибки.
+Экран обновляется каждые 10 секунд; «Обновить замер» запускает сбор немедленно.
+На главной странице и в списке проектов можно пересчитать использование диска.
+Скорость запросов нормализуется к минуте по фактическим временам двух замеров.
+График хранилища отображает размер в подходящих единицах, без округления малых
+сайтов до нуля гигабайт. Служебные логи показываются отдельно и не входят в квоту;
+в квоту входят файлы сайта и данные PHP. Ошибка чтения файлов сохраняет предыдущий
+замер и отображается в панели. Счётчики и позиция чтения access.log сохраняются
+вместе, чтобы повторный сбор после ошибки не терял запросы.
+
+На главной странице администратора отображается RAM всего сервера из Linux
+`/proc/meminfo`: использовано, доступно, всего и swap, с временем замера.
+Эти показатели относятся ко всем приложениям на сервере, не к отдельному проекту.
+
 - Встроенный сборщик каждые 60 с пишет в БД: размер папки проекта, число запросов
   и трафик из `.conf/access.log` (инкрементально, по смещению).
 - Графики «Диск, ГБ» и «Запросы/мин» — в карточке проекта.
-- Можно вынести в отдельный сервис: `./metricsd.sh` (тот же контракт БД,
+- Можно вынести в отдельный сервис: `./api/metricsd.sh` (тот же контракт БД,
   запускать на том же каталоге `users`).
 
 ## API
@@ -217,6 +306,11 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | GET | `/api/projects/{id}/files` | владелец/admin | список файлов |
 | GET | `/api/projects/{id}/metrics` | владелец/admin | метрики и ряд точек |
 | PUT | `/api/projects/{id}/enabled` | владелец/admin | `{enabled}` — включить/выключить сайт в nginx |
+| PUT | `/api/projects/{id}/provider` | владелец/admin | `{provider: "nginx" или "php-fpm"}` — тип проекта |
+| GET | `/api/projects/{id}/data-directories` | владелец/admin | каталоги данных, переменные, абсолютные пути, имена файлов |
+| POST | `/api/projects/{id}/data-directories` | владелец/admin | `{name, env}` — создать каталог и подключить к PHP-пулу |
+| GET | `/api/projects/{id}/data-directories/{directory}/files/{file}` | владелец/admin | прочитать текстовый файл до 1 МБ |
+| PUT | `/api/projects/{id}/data-directories/{directory}/files/{file}` | владелец/admin | `{content}` — сохранить текстовый файл |
 | POST | `/api/projects/{id}/apply-ssl` | владелец/admin | выпустить сертификат, включить HTTPS и редирект 80 → 443 |
 | GET | `/api/projects/{id}/nginx-config` | admin | сгенерированный конфиг сайта |
 | GET | `/api/admin/users` | admin | список пользователей с квотами |
@@ -230,6 +324,11 @@ go build -tags db_sql -o bin/fasthost . && ./bin/fasthost --db sqlite
 | POST | `/api/deploy/{id}` | API-ключ | загрузить zip с файлами проекта (полностью заменяет файлы сайта) |
 
 ## Деплой из GitHub Actions
+
+В разделе «Настройки» находится пример для PHP-сайта: выбор проекта подставляет
+его ID в YAML, кнопка «Копировать YAML» копирует весь workflow. Там же доступны
+пояснения по секрету `FASTHOST_API_KEY`, составу архива и полной замене файлов.
+Пример проверяет PHP-файлы перед упаковкой и исключает `.env` и базы SQLite.
 
 У каждого пользователя есть уникальный API-ключ (Настройки → «API-ключ деплоя»).
 Workflow собирает сайт, пакует в zip и отправляет его на деплой:

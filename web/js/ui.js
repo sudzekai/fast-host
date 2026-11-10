@@ -17,6 +17,98 @@ const ICONS = {
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>',
 };
 
+const busyControls = new WeakMap();
+
+function actionLabel(control) {
+  const text = (control.dataset.busyLabel || control.textContent || control.title || '').trim();
+  if (/SSL/.test(text)) return 'Выпускаем SSL…';
+  if (/Удалить/.test(text)) return 'Удаляем…';
+  if (/Скачать/.test(text)) return 'Готовим архив…';
+  if (/Обновить/.test(text)) return 'Обновляем…';
+  if (/Создать/.test(text)) return 'Создаём…';
+  if (/Войти/.test(text)) return 'Входим…';
+  if (/Выйти/.test(text)) return 'Выходим…';
+  if (/Копировать/.test(text)) return 'Копируем…';
+  return 'Сохраняем…';
+}
+
+function beginBusy(control, label) {
+  if (!control) return () => {};
+  const disabled = control.disabled;
+  const children = Array.from(control.childNodes);
+  const button = control.tagName === 'BUTTON';
+  let status;
+  control.disabled = true;
+  control.setAttribute('aria-busy', 'true');
+  control.classList.add('is-busy');
+  if (button) {
+    control.replaceChildren(h('span', { class: 'spinner spinner-inline', 'aria-hidden': 'true' }), document.createTextNode(label || actionLabel(control)));
+  } else if (control.type === 'checkbox') {
+    status = h('span', { class: 'action-status', role: 'status' }, [h('span', { class: 'spinner spinner-inline' }), 'Сохраняем…']);
+    (control.closest('.switch') || control).after(status);
+  }
+  return () => {
+    control.disabled = disabled;
+    control.removeAttribute('aria-busy');
+    control.classList.remove('is-busy');
+    if (button) control.replaceChildren(...children);
+    if (status) status.remove();
+  };
+}
+
+function runAction(control, action, label) {
+  if (busyControls.has(control)) return busyControls.get(control);
+  const text = label || actionLabel(control);
+  const restore = beginBusy(control, text);
+  let result;
+  try { result = action(); }
+  catch (error) { restore(); toast(error.message || 'Не удалось выполнить действие', 'err'); return; }
+  if (!result || typeof result.then !== 'function') { restore(); return result; }
+  const pending = Promise.resolve(result).catch((error) => toast(error.message || 'Не удалось выполнить действие', 'err')).finally(() => {
+    busyControls.delete(control); restore();
+  });
+  busyControls.set(control, pending);
+  return pending;
+}
+
+// One wrapper covers every button and switch created by h(), including new UI.
+function actionEvent(control, handler, event) {
+  const modal = control.closest('.modal');
+  if (busyControls.has(control) || (modal && modal.querySelector('[aria-busy="true"]'))) {
+    event.preventDefault(); return;
+  }
+  const stableEvent = new Proxy(event, { get(target, key) {
+    if (key === 'currentTarget') return control;
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  return runAction(control, () => handler(stableEvent));
+}
+
+let activeRequests = 0;
+let requestTimer;
+function requestActivity() {
+  activeRequests++;
+  if (!requestTimer) requestTimer = setTimeout(() => {
+    requestTimer = null;
+    if (!activeRequests) return;
+    let status = document.getElementById('request-status');
+    if (!status) {
+      status = h('div', { id: 'request-status', class: 'request-status', role: 'status', 'aria-live': 'polite' }, [h('span', { class: 'spinner spinner-inline' }), 'Выполняется запрос…']);
+      document.body.append(status);
+    }
+    status.hidden = false;
+  }, 150);
+  return () => {
+    activeRequests--;
+    if (!activeRequests) {
+      clearTimeout(requestTimer); requestTimer = null;
+      const status = document.getElementById('request-status');
+      if (status) status.hidden = true;
+    }
+  };
+}
+
 function h(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [key, val] of Object.entries(attrs)) {
@@ -24,7 +116,8 @@ function h(tag, attrs = {}, children = []) {
     if (key === 'class') node.className = val;
     else if (key === 'html') node.innerHTML = val;
     else if (key === 'style') node.setAttribute('style', val);
-    else if (key.startsWith('on') && typeof val === 'function') node.addEventListener(key.slice(2), val);
+    else if (key.startsWith('on') && typeof val === 'function') node.addEventListener(key.slice(2),
+      (key === 'onclick' || key === 'onchange') ? (event) => actionEvent(node, val, event) : val);
     else if (key === 'dataset') Object.assign(node.dataset, val);
     else node.setAttribute(key, val === true ? '' : val);
   }
@@ -179,13 +272,22 @@ function chart(canvas, labels, series, options = {}) {
     ctx.lineWidth = 2;
     ctx.beginPath();
     const n = data.length;
+    let started = false;
     data.forEach((v, i) => {
+      if (v == null || !Number.isFinite(v)) { started = false; return; }
       const x = padL + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1));
       const y = padT + plotH - (plotH * v) / max;
-      if (i === 0) ctx.moveTo(x, y);
+      if (!started) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
+      started = true;
     });
     ctx.stroke();
+    data.forEach((v, i) => {
+      if (v == null || !Number.isFinite(v)) return;
+      const x = padL + (n === 1 ? plotW / 2 : (plotW * i) / (n - 1));
+      const y = padT + plotH - (plotH * v) / max;
+      ctx.beginPath(); ctx.arc(x, y, n === 1 ? 3 : 1.5, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    });
   });
 
   if (labels && labels.length > 1) {

@@ -672,6 +672,37 @@ textarea.code {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.spinner.spinner-inline { display: inline-block; width: 16px; height: 16px; margin: 0; flex-shrink: 0; border-color: currentColor; border-right-color: transparent; }
+.btn.is-busy { cursor: progress; opacity: .85; }
+.action-status { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-left: 12px; }
+.request-status { position: fixed; top: 72px; right: 20px; z-index: 1200; display: flex; align-items: center; gap: 10px; background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; box-shadow: var(--shadow); }
+.request-status[hidden] { display: none; }
+.metric-status { padding: 10px 12px; border-radius: var(--radius); background: var(--ok-soft); color: var(--ink); margin-bottom: 16px; }
+.metric-status.stale, .metric-status.pending { background: var(--warn-soft); }
+.metric-status.error { background: var(--err-soft); }
+.metrics-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 16px; margin: 16px 0; }
+.metric-value { font-size: 20px; font-weight: 600; }
+
+/* ===== Настройки ===== */
+.settings-grid { align-items: start; }
+.settings-heading { display: flex; align-items: center; gap: 12px; }
+.settings-icon { display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; flex-shrink: 0; border-radius: 8px; background: var(--accent-soft); color: var(--accent); }
+.settings-icon svg { width: 21px; height: 21px; }
+.settings-key { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); overflow-wrap: anywhere; font-size: 13px; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.settings-deploy-grid { display: grid; grid-template-columns: minmax(250px, .8fr) minmax(0, 1.2fr); gap: 32px; align-items: start; }
+.settings-workflow, .settings-grid > .card { min-width: 0; }
+.settings-code-head { gap: 12px; flex-wrap: wrap; }
+.settings-code { max-height: none; margin: 0; font-size: 12px; }
+.settings-endpoint { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); font-size: 12px; overflow-wrap: anywhere; background: var(--bg); }
+.settings-steps { padding-left: 22px; margin: 24px 0; }
+.settings-steps li { margin-bottom: 20px; padding-left: 4px; }
+.settings-steps li::marker { color: var(--accent); font-weight: 600; }
+.settings-steps p, .settings-note p { margin-top: 6px; color: var(--muted); line-height: 1.6; }
+.settings-note { margin: 0 0 20px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+@media (max-width: 1100px) { .settings-deploy-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 700px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } .settings-actions .btn { flex: 1; } .settings-code-head .btn { width: 100%; } }
+
 /* ===== Фильтр-бар ===== */
 .filter-bar {
   display: flex;
